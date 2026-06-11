@@ -120,7 +120,7 @@ ensure_container_running() {
 patch_container_file() {
   info "Patching /code/rest_service.py inside container..."
 
-  docker exec \
+  docker exec -i \
     -e TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
     -e RESTART_GRACE_SECONDS="$RESTART_GRACE_SECONDS" \
     "$CONTAINER_NAME" \
@@ -200,8 +200,13 @@ copy_patch_to_host() {
   chmod 644 "$PATCH_FILE"
 
   info "Copying original backup to host: $ORIGINAL_FILE"
-  docker cp "$CONTAINER_NAME:/code/rest_service.py.original_backup" "$ORIGINAL_FILE" || true
-  [ -f "$ORIGINAL_FILE" ] && chmod 644 "$ORIGINAL_FILE"
+
+  if docker exec "$CONTAINER_NAME" test -f /code/rest_service.py.original_backup; then
+    docker cp "$CONTAINER_NAME:/code/rest_service.py.original_backup" "$ORIGINAL_FILE"
+    chmod 644 "$ORIGINAL_FILE"
+  else
+    warn "Original backup was not found inside container. Continuing anyway."
+  fi
 }
 
 backup_compose() {
