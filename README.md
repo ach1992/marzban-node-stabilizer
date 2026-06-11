@@ -1,4 +1,4 @@
-# marzban-node-stabilizer
+# Marzban Node Stabilizer
 
 A small Debian/Ubuntu helper script to stabilize Marzban Node startup/restart behavior when using heavy Xray configs.
 
