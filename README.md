@@ -1,10 +1,20 @@
-# Marzban Node Stabilizer
+# marzban-node-stabilizer
 
-A small Debian/Ubuntu helper script to stabilize Marzban Node startup/restart behavior when using heavy Xray configs.
+A one-command Debian/Ubuntu helper script to stabilize Marzban Node startup/restart behavior when using heavy Xray configs.
+
+## Install and apply automatically
+
+After uploading this repository to GitHub, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo bash
+```
+
+This one command will install the script and run the patch automatically.
 
 ## What it does
 
-This script patches `rest_service.py` inside the running `marzban-node` container and then persists the patched file on the host using a Docker Compose bind mount.
+This script patches `/code/rest_service.py` inside the running `marzban-node` container and then persists the patched file on the host using a Docker Compose bind mount.
 
 Main changes:
 
@@ -35,31 +45,37 @@ SERVICE_NAME=marzban-node
 COMPOSE_FILE=/opt/marzban-node/docker-compose.yml
 ```
 
-## Install
+## Custom install/apply
+
+If your paths or container names are different:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env \
+  COMPOSE_FILE=/opt/marzban-node/docker-compose.yml \
+  CONTAINER_NAME=marzban-node \
+  SERVICE_NAME=marzban-node \
+  bash
 ```
 
-## Apply patch
+Custom timeout values:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env \
+  TIMEOUT_SECONDS=60 \
+  RESTART_GRACE_SECONDS=90 \
+  bash
+```
+
+## Install only without applying
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env AUTO_APPLY=0 bash
+```
+
+Then apply manually:
 
 ```bash
 sudo marzban-node-stabilizer apply
-```
-
-## Apply with custom values
-
-```bash
-sudo TIMEOUT_SECONDS=60 RESTART_GRACE_SECONDS=90 marzban-node-stabilizer apply
-```
-
-Custom compose/container example:
-
-```bash
-sudo COMPOSE_FILE=/opt/marzban-node/docker-compose.yml \
-     CONTAINER_NAME=marzban-node \
-     SERVICE_NAME=marzban-node \
-     marzban-node-stabilizer apply
 ```
 
 ## Check status
@@ -76,7 +92,7 @@ This removes the bind mount from `docker-compose.yml` and recreates the containe
 sudo marzban-node-stabilizer restore
 ```
 
-## Uninstall command
+## Uninstall
 
 First restore if needed:
 

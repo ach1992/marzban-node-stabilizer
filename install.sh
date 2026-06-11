@@ -5,6 +5,7 @@ REPO="${REPO:-ach1992/marzban-node-stabilizer}"
 BRANCH="${BRANCH:-main}"
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/sbin/marzban-node-stabilizer}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+AUTO_APPLY="${AUTO_APPLY:-1}"
 
 info() {
   echo "[INFO] $*"
@@ -52,11 +53,18 @@ curl -fsSL "${RAW_BASE}/bin/marzban-node-stabilizer" -o "${INSTALL_PATH}"
 chmod +x "${INSTALL_PATH}"
 
 info "Installed successfully."
-echo
-echo "Usage:"
-echo "  sudo marzban-node-stabilizer apply"
-echo "  sudo marzban-node-stabilizer status"
-echo "  sudo marzban-node-stabilizer restore"
-echo
-echo "Custom example:"
-echo "  sudo COMPOSE_FILE=/opt/marzban-node/docker-compose.yml CONTAINER_NAME=marzban-node marzban-node-stabilizer apply"
+
+if [ "$AUTO_APPLY" = "1" ]; then
+  echo
+  info "Running patch automatically..."
+  echo
+  "${INSTALL_PATH}" apply
+  echo
+  info "All done."
+else
+  echo
+  info "Auto apply disabled."
+  echo
+  echo "Run manually with:"
+  echo "  sudo marzban-node-stabilizer apply"
+fi
