@@ -1,0 +1,409 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="marzban-node-stabilizer"
+
+CONTAINER_NAME="${CONTAINER_NAME:-marzban-node}"
+SERVICE_NAME="${SERVICE_NAME:-marzban-node}"
+COMPOSE_FILE="${COMPOSE_FILE:-/opt/marzban-node/docker-compose.yml}"
+
+PATCH_DIR="${PATCH_DIR:-/opt/marzban-node-patches}"
+PATCH_FILE="$PATCH_DIR/rest_service.py"
+ORIGINAL_FILE="$PATCH_DIR/rest_service.py.original_backup"
+
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-45}"
+RESTART_GRACE_SECONDS="${RESTART_GRACE_SECONDS:-60}"
+STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-70}"
+
+info() {
+  echo "[INFO] $*"
+}
+
+warn() {
+  echo "[WARN] $*" >&2
+}
+
+error() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+${APP_NAME}
+
+Usage:
+  sudo ${APP_NAME} apply
+  sudo ${APP_NAME} status
+  sudo ${APP_NAME} restore
+  sudo ${APP_NAME} help
+
+Environment variables:
+  CONTAINER_NAME          Default: marzban-node
+  SERVICE_NAME            Default: marzban-node
+  COMPOSE_FILE            Default: /opt/marzban-node/docker-compose.yml
+  PATCH_DIR               Default: /opt/marzban-node-patches
+  TIMEOUT_SECONDS         Default: 45
+  RESTART_GRACE_SECONDS   Default: 60
+  STARTUP_WAIT_SECONDS    Default: 70
+
+Examples:
+  sudo ${APP_NAME} apply
+
+  sudo TIMEOUT_SECONDS=60 RESTART_GRACE_SECONDS=90 ${APP_NAME} apply
+
+  sudo COMPOSE_FILE=/opt/marzban-node/docker-compose.yml \
+       CONTAINER_NAME=marzban-node \
+       SERVICE_NAME=marzban-node \
+       ${APP_NAME} apply
+EOF
+}
+
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    error "Run this command as root."
+  fi
+}
+
+check_os() {
+  if [ ! -f /etc/os-release ]; then
+    error "Cannot detect OS. Debian/Ubuntu is required."
+  fi
+
+  . /etc/os-release
+
+  OS_MATCH=" ${ID:-} ${ID_LIKE:-} "
+  case "$OS_MATCH" in
+    *" debian "*|*" ubuntu "*)
+      ;;
+    *)
+      error "Unsupported OS: ${PRETTY_NAME:-unknown}. Debian/Ubuntu is required."
+      ;;
+  esac
+}
+
+check_requirements() {
+  command -v python3 >/dev/null 2>&1 || error "python3 is required."
+  command -v docker >/dev/null 2>&1 || error "docker is required."
+
+  if ! docker info >/dev/null 2>&1; then
+    error "Docker is not running or current user cannot access Docker."
+  fi
+
+  if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+    error "docker compose or docker-compose is required."
+  fi
+
+  if [ ! -f "$COMPOSE_FILE" ]; then
+    error "Compose file not found: $COMPOSE_FILE"
+  fi
+}
+
+compose_up_recreate() {
+  cd "$(dirname "$COMPOSE_FILE")"
+
+  if docker compose version >/dev/null 2>&1; then
+    docker compose up -d --force-recreate "$SERVICE_NAME" || docker compose up -d --force-recreate
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose up -d --force-recreate "$SERVICE_NAME" || docker-compose up -d --force-recreate
+  else
+    error "Neither docker compose nor docker-compose found."
+  fi
+}
+
+ensure_container_running() {
+  if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    error "Container is not running: $CONTAINER_NAME. Start Marzban Node first, then run this command."
+  fi
+}
+
+patch_container_file() {
+  info "Patching /code/rest_service.py inside container..."
+
+  docker exec \
+    -e TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
+    -e RESTART_GRACE_SECONDS="$RESTART_GRACE_SECONDS" \
+    "$CONTAINER_NAME" \
+    python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+import py_compile
+
+timeout = int(os.environ.get("TIMEOUT_SECONDS", "45"))
+grace = int(os.environ.get("RESTART_GRACE_SECONDS", "60"))
+
+p = Path("/code/rest_service.py")
+if not p.exists():
+    raise SystemExit("[ERROR] /code/rest_service.py not found inside container")
+
+s = p.read_text()
+backup = Path("/code/rest_service.py.original_backup")
+
+if not backup.exists():
+    backup.write_text(s)
+
+s = re.sub(
+    r"end_time\s*=\s*start_time\s*\+\s*\d+",
+    f"end_time = start_time + {timeout}",
+    s,
+)
+
+if "self.last_start_ts" not in s:
+    s = s.replace(
+        "        self.config = None\n",
+        "        self.config = None\n        self.last_start_ts = 0\n",
+        1,
+    )
+
+if "self.core.start(config)\n                self.last_start_ts = time.time()" not in s:
+    s = s.replace(
+        "                self.core.start(config)\n",
+        "                self.core.start(config)\n                self.last_start_ts = time.time()\n",
+        1,
+    )
+
+if "Ignoring restart during Xray startup grace period" not in s:
+    needle = (
+        "        try:\n"
+        "            with self.core.get_logs() as logs:\n"
+        "                self.core.restart(config)\n"
+    )
+
+    repl = (
+        f"        if self.core.started and time.time() - self.last_start_ts < {grace}:\n"
+        "            logger.warning(\"Ignoring restart during Xray startup grace period.\")\n"
+        "            return self.response()\n"
+        "        try:\n"
+        "            with self.core.get_logs() as logs:\n"
+        "                self.core.restart(config)\n"
+        "                self.last_start_ts = time.time()\n"
+    )
+
+    if needle not in s:
+        raise SystemExit("[ERROR] Could not find restart block. Marzban Node code may have changed.")
+
+    s = s.replace(needle, repl, 1)
+
+p.write_text(s)
+py_compile.compile(str(p), doraise=True)
+
+print("[OK] rest_service.py patched")
+PY
+}
+
+copy_patch_to_host() {
+  mkdir -p "$PATCH_DIR"
+
+  info "Copying patched file to host: $PATCH_FILE"
+  docker cp "$CONTAINER_NAME:/code/rest_service.py" "$PATCH_FILE"
+  chmod 644 "$PATCH_FILE"
+
+  info "Copying original backup to host: $ORIGINAL_FILE"
+  docker cp "$CONTAINER_NAME:/code/rest_service.py.original_backup" "$ORIGINAL_FILE" || true
+  [ -f "$ORIGINAL_FILE" ] && chmod 644 "$ORIGINAL_FILE"
+}
+
+backup_compose() {
+  info "Backing up compose file..."
+  cp "$COMPOSE_FILE" "$COMPOSE_FILE.bak.$(date +%Y%m%d-%H%M%S)"
+}
+
+add_bind_mount() {
+  info "Adding bind mount to docker-compose.yml if missing..."
+
+  COMPOSE_FILE="$COMPOSE_FILE" PATCH_FILE="$PATCH_FILE" python3 - <<'PY'
+import os
+from pathlib import Path
+
+compose_path = Path(os.environ["COMPOSE_FILE"])
+patch_file = os.environ["PATCH_FILE"]
+mount_line = f"- {patch_file}:/code/rest_service.py:ro"
+
+text = compose_path.read_text()
+
+if "/code/rest_service.py" in text:
+    print("[OK] bind mount already exists")
+    raise SystemExit(0)
+
+lines = text.splitlines()
+service_start = None
+service_indent = None
+
+for i, line in enumerate(lines):
+    if line.strip() == "marzban-node:":
+        service_start = i
+        service_indent = len(line) - len(line.lstrip())
+        break
+
+if service_start is None:
+    raise SystemExit("[ERROR] Could not find service named marzban-node in compose file")
+
+service_end = len(lines)
+
+for i in range(service_start + 1, len(lines)):
+    line = lines[i]
+    if line.strip() and (len(line) - len(line.lstrip())) <= service_indent:
+        service_end = i
+        break
+
+block = lines[service_start:service_end]
+vol_idx = None
+
+for idx, line in enumerate(block):
+    if line.strip() == "volumes:":
+        vol_idx = service_start + idx
+        break
+
+if vol_idx is not None:
+    vol_indent = len(lines[vol_idx]) - len(lines[vol_idx].lstrip())
+    item_indent = " " * (vol_indent + 2)
+    insert_at = vol_idx + 1
+
+    while insert_at < service_end:
+        l = lines[insert_at]
+        if l.strip() and (len(l) - len(l.lstrip())) <= vol_indent:
+            break
+        insert_at += 1
+
+    lines.insert(insert_at, item_indent + mount_line)
+else:
+    key_indent = " " * (service_indent + 2)
+    item_indent = " " * (service_indent + 4)
+    insert_at = service_end
+    lines.insert(insert_at, key_indent + "volumes:")
+    lines.insert(insert_at + 1, item_indent + mount_line)
+
+compose_path.write_text("\n".join(lines) + "\n")
+print("[OK] bind mount added")
+PY
+}
+
+remove_bind_mount() {
+  info "Removing bind mount from docker-compose.yml if present..."
+
+  COMPOSE_FILE="$COMPOSE_FILE" PATCH_FILE="$PATCH_FILE" python3 - <<'PY'
+import os
+from pathlib import Path
+
+compose_path = Path(os.environ["COMPOSE_FILE"])
+patch_file = os.environ["PATCH_FILE"]
+
+text = compose_path.read_text()
+lines = text.splitlines()
+
+targets = [
+    f"- {patch_file}:/code/rest_service.py:ro",
+    f"- {patch_file}:/code/rest_service.py",
+]
+
+new_lines = []
+removed = False
+
+for line in lines:
+    stripped = line.strip()
+    if stripped in targets or "/code/rest_service.py" in stripped:
+        removed = True
+        continue
+    new_lines.append(line)
+
+compose_path.write_text("\n".join(new_lines) + "\n")
+
+if removed:
+    print("[OK] bind mount removed")
+else:
+    print("[OK] bind mount was not present")
+PY
+}
+
+apply_patch() {
+  require_root
+  check_os
+  check_requirements
+  ensure_container_running
+
+  echo "[INFO] ${APP_NAME}"
+  echo "[INFO] container: $CONTAINER_NAME"
+  echo "[INFO] service:   $SERVICE_NAME"
+  echo "[INFO] compose:   $COMPOSE_FILE"
+  echo "[INFO] patch dir: $PATCH_DIR"
+  echo "[INFO] timeout:   $TIMEOUT_SECONDS seconds"
+  echo "[INFO] grace:     $RESTART_GRACE_SECONDS seconds"
+  echo
+
+  patch_container_file
+  copy_patch_to_host
+  backup_compose
+  add_bind_mount
+
+  info "Recreating container so bind mount becomes active..."
+  compose_up_recreate
+
+  echo
+  info "Waiting ${STARTUP_WAIT_SECONDS} seconds for heavy Xray config startup..."
+  sleep "$STARTUP_WAIT_SECONDS"
+
+  show_status
+
+  echo
+  echo "[DONE] Patch applied."
+  echo "If port 62051 is open and ping is 200 OK in logs, the node is stable."
+}
+
+show_status() {
+  require_root
+  check_requirements
+
+  echo
+  echo "[INFO] Docker container:"
+  docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+
+  echo
+  echo "[INFO] Xray process inside container:"
+  docker exec "$CONTAINER_NAME" sh -c 'pgrep -a xray || true' || true
+
+  echo
+  echo "[INFO] Listening ports inside container:"
+  docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray|62050|62051' || true" || true
+
+  echo
+  echo "[INFO] Recent logs:"
+  docker logs --tail=80 "$CONTAINER_NAME" || true
+}
+
+restore_patch() {
+  require_root
+  check_os
+  check_requirements
+
+  backup_compose
+  remove_bind_mount
+
+  info "Recreating container without bind mount..."
+  compose_up_recreate
+
+  echo
+  echo "[DONE] Restore completed."
+  echo "The compose bind mount was removed. Marzban Node should now use its original image file."
+}
+
+COMMAND="${1:-help}"
+
+case "$COMMAND" in
+  apply)
+    apply_patch
+    ;;
+  status)
+    show_status
+    ;;
+  restore)
+    restore_patch
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
