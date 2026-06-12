@@ -6,8 +6,6 @@ This version is resumable and idempotent. If the script is interrupted halfway, 
 
 ## Install and apply automatically
 
-After uploading this repository to GitHub, run:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo bash
 ```
