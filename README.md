@@ -1,6 +1,8 @@
-# Marzban Node Stabilizer
+# marzban-node-stabilizer
 
 A one-command Debian/Ubuntu helper script to stabilize Marzban Node startup/restart behavior when using heavy Xray configs.
+
+This version is resumable and idempotent. If the script is interrupted halfway, running the same install command again should recover the server state automatically.
 
 ## Install and apply automatically
 
@@ -10,11 +12,17 @@ After uploading this repository to GitHub, run:
 curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo bash
 ```
 
-This one command will install the script and run the patch automatically.
+This command will:
+
+1. Check that the OS is Debian or Ubuntu.
+2. Install missing basic dependencies: `curl`, `ca-certificates`, `python3`.
+3. Download `marzban-node-stabilizer` into `/usr/local/sbin/`.
+4. Run the patch automatically.
+5. Recover automatically if a previous run was interrupted.
 
 ## What it does
 
-This script patches `/code/rest_service.py` inside the running `marzban-node` container and then persists the patched file on the host using a Docker Compose bind mount.
+This script patches `/code/rest_service.py` for the `marzban-node` container and persists the patched file on the host using a Docker Compose bind mount.
 
 Main changes:
 
@@ -23,6 +31,7 @@ Main changes:
 - Ignores restart requests during the startup grace period.
 - Creates a backup of the Docker Compose file before editing.
 - Supports restore by removing the bind mount.
+- Can resume if interrupted halfway.
 
 ## Supported OS
 
@@ -35,7 +44,7 @@ Main changes:
 - Docker
 - Docker Compose plugin or legacy `docker-compose`
 - Python 3
-- A running Marzban Node container
+- A Marzban Node Docker Compose installation
 
 Default assumptions:
 

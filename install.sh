@@ -5,10 +5,15 @@ REPO="${REPO:-ach1992/marzban-node-stabilizer}"
 BRANCH="${BRANCH:-main}"
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/sbin/marzban-node-stabilizer}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+
 AUTO_APPLY="${AUTO_APPLY:-1}"
 
 info() {
   echo "[INFO] $*"
+}
+
+warn() {
+  echo "[WARN] $*" >&2
 }
 
 error() {
@@ -27,6 +32,7 @@ fi
 . /etc/os-release
 
 OS_MATCH=" ${ID:-} ${ID_LIKE:-} "
+
 case "$OS_MATCH" in
   *" debian "*|*" ubuntu "*)
     ;;
@@ -58,7 +64,9 @@ if [ "$AUTO_APPLY" = "1" ]; then
   echo
   info "Running patch automatically..."
   echo
+
   "${INSTALL_PATH}" apply
+
   echo
   info "All done."
 else
