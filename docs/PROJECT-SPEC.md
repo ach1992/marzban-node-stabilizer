@@ -142,13 +142,15 @@ At minimum, keep these checks available for relevant changes:
 ```bash
 bash -n install.sh
 bash -n bin/marzban-node-stabilizer
+python3 -m py_compile lib/patch_rest_service.py lib/compose_mount.py
+python3 -m unittest discover -s tests -v
 ```
 
-Use ShellCheck when available.
+Use ShellCheck for shell changes. The repository CI should run the same focused validation rather than duplicating multiple equivalent suites.
 
 Behavioral fixes should add focused regression coverage rather than relying only on shell syntax checks.
 
-Patch-transform logic should be tested against representative upstream source fixtures and for repeat/idempotent application.
+Patch-transform logic should be tested against representative reviewed upstream source fixtures and for repeat/idempotent application.
 
 Compose-editing behavior should be tested against representative supported layouts and validated before service recreation.
 
