@@ -8,13 +8,31 @@ SERVICE_NAME="${SERVICE_NAME:-marzban-node}"
 COMPOSE_FILE="${COMPOSE_FILE:-/opt/marzban-node/docker-compose.yml}"
 
 PATCH_DIR="${PATCH_DIR:-/opt/marzban-node-patches}"
-PATCH_FILE="$PATCH_DIR/rest_service.py"
-ORIGINAL_FILE="$PATCH_DIR/rest_service.py.original_backup"
+PATCH_FILE="${PATCH_FILE:-$PATCH_DIR/rest_service.py}"
+ORIGINAL_FILE="${ORIGINAL_FILE:-$PATCH_DIR/rest_service.py.original_backup}"
+METADATA_FILE="${METADATA_FILE:-$PATCH_DIR/metadata.env}"
 
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-45}"
+INSTALLED_LIB_DIR="${INSTALLED_LIB_DIR:-/usr/local/lib/marzban-node-stabilizer}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_LIB_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/../lib" 2>/dev/null && pwd || true)"
+if [ -n "$REPO_LIB_DIR" ] && [ -f "$REPO_LIB_DIR/patch_rest_service.py" ]; then
+  PATCHER_PATH="${PATCHER_PATH:-$REPO_LIB_DIR/patch_rest_service.py}"
+  COMPOSE_EDITOR_PATH="${COMPOSE_EDITOR_PATH:-$REPO_LIB_DIR/compose_mount.py}"
+else
+  PATCHER_PATH="${PATCHER_PATH:-$INSTALLED_LIB_DIR/patch_rest_service.py}"
+  COMPOSE_EDITOR_PATH="${COMPOSE_EDITOR_PATH:-$INSTALLED_LIB_DIR/compose_mount.py}"
+fi
+
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7}"
 RESTART_GRACE_SECONDS="${RESTART_GRACE_SECONDS:-60}"
 STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-70}"
-START_WAIT_SECONDS="${START_WAIT_SECONDS:-10}"
+START_WAIT_SECONDS="${START_WAIT_SECONDS:-15}"
+REQUEST_WAIT_CAP_SECONDS=8
+LOCK_FILE="${LOCK_FILE:-/run/lock/marzban-node-stabilizer.lock}"
+
+LAST_COMPOSE_BACKUP=""
+ACTIVE_TMP_DIR=""
+CURRENT_IMAGE_ID=""
 
 info() {
   echo "[INFO] $*"
@@ -29,6 +47,13 @@ error() {
   exit 1
 }
 
+cleanup_temp() {
+  if [ -n "$ACTIVE_TMP_DIR" ] && [ -d "$ACTIVE_TMP_DIR" ]; then
+    rm -rf -- "$ACTIVE_TMP_DIR"
+  fi
+}
+trap cleanup_temp EXIT
+
 usage() {
   cat <<USAGE
 ${APP_NAME}
@@ -36,6 +61,7 @@ ${APP_NAME}
 Usage:
   sudo ${APP_NAME} apply
   sudo ${APP_NAME} status
+  sudo ${APP_NAME} diagnose
   sudo ${APP_NAME} restore
   sudo ${APP_NAME} help
 
@@ -44,10 +70,10 @@ Environment variables:
   SERVICE_NAME            Default: marzban-node
   COMPOSE_FILE            Default: /opt/marzban-node/docker-compose.yml
   PATCH_DIR               Default: /opt/marzban-node-patches
-  TIMEOUT_SECONDS         Default: 45
+  TIMEOUT_SECONDS         Default: 7 (values above 8 are clamped for current caller compatibility)
   RESTART_GRACE_SECONDS   Default: 60
-  STARTUP_WAIT_SECONDS    Default: 70
-  START_WAIT_SECONDS      Default: 10
+  STARTUP_WAIT_SECONDS    Default: 70 (maximum wait; exits early when Xray is seen)
+  START_WAIT_SECONDS      Default: 15
 USAGE
 }
 
@@ -63,17 +89,41 @@ check_os() {
   fi
 
   . /etc/os-release
-  OS_MATCH=" ${ID:-} ${ID_LIKE:-} "
+  local os_match=" ${ID:-} ${ID_LIKE:-} "
 
-  case "$OS_MATCH" in
+  case "$os_match" in
     *" debian "*|*" ubuntu "*) ;;
     *) error "Unsupported OS: ${PRETTY_NAME:-unknown}. Debian/Ubuntu is required." ;;
   esac
 }
 
+is_uint() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+normalize_settings() {
+  is_uint "$TIMEOUT_SECONDS" || error "TIMEOUT_SECONDS must be a non-negative integer."
+  is_uint "$RESTART_GRACE_SECONDS" || error "RESTART_GRACE_SECONDS must be a non-negative integer."
+  is_uint "$STARTUP_WAIT_SECONDS" || error "STARTUP_WAIT_SECONDS must be a non-negative integer."
+  is_uint "$START_WAIT_SECONDS" || error "START_WAIT_SECONDS must be a non-negative integer."
+
+  [ "$TIMEOUT_SECONDS" -ge 1 ] || error "TIMEOUT_SECONDS must be at least 1."
+  [ "$RESTART_GRACE_SECONDS" -le 3600 ] || error "RESTART_GRACE_SECONDS must be at most 3600."
+  [ "$STARTUP_WAIT_SECONDS" -le 600 ] || error "STARTUP_WAIT_SECONDS must be at most 600."
+  [ "$START_WAIT_SECONDS" -ge 1 ] || error "START_WAIT_SECONDS must be at least 1."
+  [ "$START_WAIT_SECONDS" -le 120 ] || error "START_WAIT_SECONDS must be at most 120."
+
+  if [ "$TIMEOUT_SECONDS" -gt "$REQUEST_WAIT_CAP_SECONDS" ]; then
+    warn "TIMEOUT_SECONDS=$TIMEOUT_SECONDS exceeds the current safe node-side request budget. Clamping to $REQUEST_WAIT_CAP_SECONDS seconds."
+    TIMEOUT_SECONDS="$REQUEST_WAIT_CAP_SECONDS"
+  fi
+}
+
 check_requirements() {
   command -v python3 >/dev/null 2>&1 || error "python3 is required."
   command -v docker >/dev/null 2>&1 || error "docker is required."
+  command -v sha256sum >/dev/null 2>&1 || error "sha256sum is required."
+  command -v flock >/dev/null 2>&1 || error "flock is required (provided by util-linux on Debian/Ubuntu)."
 
   if ! docker info >/dev/null 2>&1; then
     error "Docker is not running or current user cannot access Docker."
@@ -83,327 +133,98 @@ check_requirements() {
     error "docker compose or docker-compose is required."
   fi
 
-  if [ ! -f "$COMPOSE_FILE" ]; then
-    error "Compose file not found: $COMPOSE_FILE"
+  [ -f "$COMPOSE_FILE" ] || error "Compose file not found: $COMPOSE_FILE"
+}
+
+check_apply_helpers() {
+  [ -f "$PATCHER_PATH" ] || error "Patch helper not found: $PATCHER_PATH. Re-run the installer."
+  [ -f "$COMPOSE_EDITOR_PATH" ] || error "Compose helper not found: $COMPOSE_EDITOR_PATH. Re-run the installer."
+}
+
+check_compose_editor() {
+  [ -f "$COMPOSE_EDITOR_PATH" ] || error "Compose helper not found: $COMPOSE_EDITOR_PATH. Re-run the installer or restore the Compose file from backup manually."
+}
+
+acquire_lock() {
+  mkdir -p -- "$(dirname -- "$LOCK_FILE")"
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    error "Another ${APP_NAME} apply/restore operation is already running."
   fi
 }
 
-container_is_running() {
-  docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
+compose_exec() {
+  local compose_dir compose_name
+  compose_dir="$(dirname -- "$COMPOSE_FILE")"
+  compose_name="$(basename -- "$COMPOSE_FILE")"
+
+  if docker compose version >/dev/null 2>&1; then
+    (cd "$compose_dir" && docker compose -f "$compose_name" "$@")
+  else
+    (cd "$compose_dir" && docker-compose -f "$compose_name" "$@")
+  fi
+}
+
+compose_validate() {
+  compose_exec config -q
 }
 
 compose_up() {
   local mode="${1:-normal}"
-  cd "$(dirname "$COMPOSE_FILE")"
-
-  if docker compose version >/dev/null 2>&1; then
-    if [ "$mode" = "force" ]; then
-      docker compose up -d --force-recreate "$SERVICE_NAME" || docker compose up -d --force-recreate
-    else
-      docker compose up -d "$SERVICE_NAME" || docker compose up -d
-    fi
-  elif command -v docker-compose >/dev/null 2>&1; then
-    if [ "$mode" = "force" ]; then
-      docker-compose up -d --force-recreate "$SERVICE_NAME" || docker-compose up -d --force-recreate
-    else
-      docker-compose up -d "$SERVICE_NAME" || docker-compose up -d
-    fi
+  if [ "$mode" = "force" ]; then
+    compose_exec up -d --force-recreate "$SERVICE_NAME"
   else
-    error "Neither docker compose nor docker-compose found."
+    compose_exec up -d "$SERVICE_NAME"
   fi
 }
 
 backup_compose() {
-  info "Backing up compose file..."
-  cp "$COMPOSE_FILE" "$COMPOSE_FILE.bak.$(date +%Y%m%d-%H%M%S)"
+  local stamp
+  stamp="$(date +%Y%m%d-%H%M%S).$$"
+  LAST_COMPOSE_BACKUP="$COMPOSE_FILE.bak.$stamp"
+  info "Backing up compose file to $LAST_COMPOSE_BACKUP"
+  cp -p -- "$COMPOSE_FILE" "$LAST_COMPOSE_BACKUP"
+}
+
+restore_compose_backup() {
+  if [ -n "$LAST_COMPOSE_BACKUP" ] && [ -f "$LAST_COMPOSE_BACKUP" ]; then
+    warn "Restoring compose backup: $LAST_COMPOSE_BACKUP"
+    cp -p -- "$LAST_COMPOSE_BACKUP" "$COMPOSE_FILE"
+  fi
 }
 
 compose_has_rest_service_mount() {
-  grep -q "/code/rest_service.py" "$COMPOSE_FILE"
-}
+  if [ -f "$COMPOSE_EDITOR_PATH" ]; then
+    python3 "$COMPOSE_EDITOR_PATH" has --file "$COMPOSE_FILE" --service "$SERVICE_NAME"
+    return
+  fi
 
-host_patch_file_is_valid() {
-  [ -f "$PATCH_FILE" ] || return 1
-  python3 -m py_compile "$PATCH_FILE" >/dev/null 2>&1
-}
-
-remove_bind_mount() {
-  info "Removing rest_service.py bind mount from docker-compose.yml if present..."
-
-  COMPOSE_FILE="$COMPOSE_FILE" python3 - <<'PY'
-import os
-from pathlib import Path
-
-compose_path = Path(os.environ["COMPOSE_FILE"])
-lines = compose_path.read_text().splitlines()
-
-out = []
-removed = False
-
-for line in lines:
-    if "/code/rest_service.py" in line:
-        removed = True
-        continue
-    out.append(line)
-
-clean = []
-i = 0
-
-while i < len(out):
-    line = out[i]
-
-    if line.strip() == "volumes:":
-        indent = len(line) - len(line.lstrip())
-        j = i + 1
-        has_item = False
-
-        while j < len(out):
-            next_line = out[j]
-            if next_line.strip() and (len(next_line) - len(next_line.lstrip())) <= indent:
-                break
-            if next_line.strip().startswith("- "):
-                has_item = True
-            j += 1
-
-        if not has_item:
-            removed = True
-            i = j
-            continue
-
-    clean.append(line)
-    i += 1
-
-compose_path.write_text("\n".join(clean) + "\n")
-
-if removed:
-    print("[OK] bind mount removed")
-else:
-    print("[OK] bind mount was not present")
-PY
+  # Compatibility fallback for an older partial installation where the helper
+  # is unavailable. New installations always use the scoped helper above.
+  grep -Fq "/code/rest_service.py" "$COMPOSE_FILE"
 }
 
 add_bind_mount() {
-  info "Ensuring rest_service.py bind mount exists in docker-compose.yml..."
-
-  COMPOSE_FILE="$COMPOSE_FILE" PATCH_FILE="$PATCH_FILE" SERVICE_NAME="$SERVICE_NAME" python3 - <<'PY'
-import os
-from pathlib import Path
-
-compose_path = Path(os.environ["COMPOSE_FILE"])
-patch_file = os.environ["PATCH_FILE"]
-service_name = os.environ["SERVICE_NAME"]
-mount_line = f"- {patch_file}:/code/rest_service.py:ro"
-
-lines = compose_path.read_text().splitlines()
-lines = [line for line in lines if "/code/rest_service.py" not in line]
-
-service_start = None
-service_indent = None
-
-for i, line in enumerate(lines):
-    if line.strip() == f"{service_name}:":
-        service_start = i
-        service_indent = len(line) - len(line.lstrip())
-        break
-
-if service_start is None:
-    raise SystemExit(f"[ERROR] Could not find service named {service_name} in compose file")
-
-service_end = len(lines)
-
-for i in range(service_start + 1, len(lines)):
-    line = lines[i]
-    if line.strip() and (len(line) - len(line.lstrip())) <= service_indent:
-        service_end = i
-        break
-
-block = lines[service_start:service_end]
-vol_idx = None
-
-for idx, line in enumerate(block):
-    if line.strip() == "volumes:":
-        vol_idx = service_start + idx
-        break
-
-if vol_idx is not None:
-    vol_indent = len(lines[vol_idx]) - len(lines[vol_idx].lstrip())
-    item_indent = " " * (vol_indent + 2)
-    insert_at = vol_idx + 1
-
-    while insert_at < service_end:
-        line = lines[insert_at]
-        if line.strip() and (len(line) - len(line.lstrip())) <= vol_indent:
-            break
-        insert_at += 1
-
-    lines.insert(insert_at, item_indent + mount_line)
-else:
-    key_indent = " " * (service_indent + 2)
-    item_indent = " " * (service_indent + 4)
-    insert_at = service_end
-    lines.insert(insert_at, key_indent + "volumes:")
-    lines.insert(insert_at + 1, item_indent + mount_line)
-
-compose_path.write_text("\n".join(lines) + "\n")
-print("[OK] bind mount configured")
-PY
+  info "Ensuring rest_service.py bind mount exists in Compose..."
+  python3 "$COMPOSE_EDITOR_PATH" add \
+    --file "$COMPOSE_FILE" \
+    --service "$SERVICE_NAME" \
+    --patch-file "$PATCH_FILE"
 }
 
-patch_file_python() {
-  local target_file="$1"
-
-  TARGET_FILE="$target_file" \
-  TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
-  RESTART_GRACE_SECONDS="$RESTART_GRACE_SECONDS" \
-  python3 - <<'PY'
-import os
-import re
-from pathlib import Path
-import py_compile
-
-target = Path(os.environ["TARGET_FILE"])
-timeout = int(os.environ.get("TIMEOUT_SECONDS", "45"))
-grace = int(os.environ.get("RESTART_GRACE_SECONDS", "60"))
-
-if not target.exists():
-    raise SystemExit(f"[ERROR] File not found: {target}")
-
-s = target.read_text()
-backup = target.with_name(target.name + ".original_backup")
-
-if not backup.exists():
-    backup.write_text(s)
-
-s = re.sub(r"end_time\s*=\s*start_time\s*\+\s*\d+", f"end_time = start_time + {timeout}", s)
-
-if "self.last_start_ts" not in s:
-    s = s.replace(
-        "        self.config = None\n",
-        "        self.config = None\n        self.last_start_ts = 0\n",
-        1,
-    )
-
-if "self.core.start(config)\n                self.last_start_ts = time.time()" not in s:
-    s = s.replace(
-        "                self.core.start(config)\n",
-        "                self.core.start(config)\n                self.last_start_ts = time.time()\n",
-        1,
-    )
-
-s = re.sub(r"time\.time\(\)\s*-\s*self\.last_start_ts\s*<\s*\d+", f"time.time() - self.last_start_ts < {grace}", s)
-
-if "Ignoring restart during Xray startup grace period" not in s:
-    needle = (
-        "        try:\n"
-        "            with self.core.get_logs() as logs:\n"
-        "                self.core.restart(config)\n"
-    )
-    repl = (
-        f"        if self.core.started and time.time() - self.last_start_ts < {grace}:\n"
-        "            logger.warning(\"Ignoring restart during Xray startup grace period.\")\n"
-        "            return self.response()\n"
-        "        try:\n"
-        "            with self.core.get_logs() as logs:\n"
-        "                self.core.restart(config)\n"
-        "                self.last_start_ts = time.time()\n"
-    )
-    if needle not in s:
-        raise SystemExit("[ERROR] Could not find restart block. Marzban Node code may have changed.")
-    s = s.replace(needle, repl, 1)
-
-target.write_text(s)
-py_compile.compile(str(target), doraise=True)
-print(f"[OK] patched: {target}")
-PY
+remove_bind_mount() {
+  info "Removing stabilizer rest_service.py bind mount if present..."
+  python3 "$COMPOSE_EDITOR_PATH" remove \
+    --file "$COMPOSE_FILE" \
+    --service "$SERVICE_NAME"
 }
 
-patch_container_file() {
-  info "Patching /code/rest_service.py inside container..."
-
-  docker exec -i \
-    -e TIMEOUT_SECONDS="$TIMEOUT_SECONDS" \
-    -e RESTART_GRACE_SECONDS="$RESTART_GRACE_SECONDS" \
-    "$CONTAINER_NAME" \
-    python3 - <<'PY'
-import os
-import re
-from pathlib import Path
-import py_compile
-
-timeout = int(os.environ.get("TIMEOUT_SECONDS", "45"))
-grace = int(os.environ.get("RESTART_GRACE_SECONDS", "60"))
-target = Path("/code/rest_service.py")
-
-if not target.exists():
-    raise SystemExit("[ERROR] /code/rest_service.py not found inside container")
-
-s = target.read_text()
-backup = Path("/code/rest_service.py.original_backup")
-
-if not backup.exists():
-    backup.write_text(s)
-
-s = re.sub(r"end_time\s*=\s*start_time\s*\+\s*\d+", f"end_time = start_time + {timeout}", s)
-
-if "self.last_start_ts" not in s:
-    s = s.replace(
-        "        self.config = None\n",
-        "        self.config = None\n        self.last_start_ts = 0\n",
-        1,
-    )
-
-if "self.core.start(config)\n                self.last_start_ts = time.time()" not in s:
-    s = s.replace(
-        "                self.core.start(config)\n",
-        "                self.core.start(config)\n                self.last_start_ts = time.time()\n",
-        1,
-    )
-
-s = re.sub(r"time\.time\(\)\s*-\s*self\.last_start_ts\s*<\s*\d+", f"time.time() - self.last_start_ts < {grace}", s)
-
-if "Ignoring restart during Xray startup grace period" not in s:
-    needle = (
-        "        try:\n"
-        "            with self.core.get_logs() as logs:\n"
-        "                self.core.restart(config)\n"
-    )
-    repl = (
-        f"        if self.core.started and time.time() - self.last_start_ts < {grace}:\n"
-        "            logger.warning(\"Ignoring restart during Xray startup grace period.\")\n"
-        "            return self.response()\n"
-        "        try:\n"
-        "            with self.core.get_logs() as logs:\n"
-        "                self.core.restart(config)\n"
-        "                self.last_start_ts = time.time()\n"
-    )
-    if needle not in s:
-        raise SystemExit("[ERROR] Could not find restart block. Marzban Node code may have changed.")
-    s = s.replace(needle, repl, 1)
-
-target.write_text(s)
-py_compile.compile(str(target), doraise=True)
-print("[OK] patched: /code/rest_service.py")
-PY
+container_exists() {
+  docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1
 }
 
-container_file_is_writable() {
-  docker exec "$CONTAINER_NAME" sh -c 'test -w /code/rest_service.py' >/dev/null 2>&1
-}
-
-copy_patch_to_host() {
-  mkdir -p "$PATCH_DIR"
-
-  info "Copying patched file to host: $PATCH_FILE"
-  docker cp "$CONTAINER_NAME:/code/rest_service.py" "$PATCH_FILE"
-  chmod 644 "$PATCH_FILE"
-
-  info "Copying original backup to host: $ORIGINAL_FILE"
-  if docker exec "$CONTAINER_NAME" test -f /code/rest_service.py.original_backup; then
-    docker cp "$CONTAINER_NAME:/code/rest_service.py.original_backup" "$ORIGINAL_FILE"
-    chmod 644 "$ORIGINAL_FILE"
-  else
-    warn "Original backup was not found inside container. Continuing anyway."
-  fi
+container_is_running() {
+  [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" = "true" ]
 }
 
 wait_for_container() {
@@ -418,116 +239,221 @@ wait_for_container() {
   return 1
 }
 
-ensure_container_running_or_recover() {
-  if container_is_running; then
+ensure_container_exists() {
+  if container_exists; then
     return 0
   fi
 
-  warn "Container is not running: $CONTAINER_NAME"
-  info "Trying to start it with Docker Compose..."
-
-  if compose_up normal && wait_for_container; then
-    return 0
-  fi
-
-  if compose_has_rest_service_mount && ! host_patch_file_is_valid; then
-    warn "Container did not start and current rest_service.py mount is missing or invalid."
-    warn "Recovering by removing the bind mount and starting the original container..."
-    backup_compose
-    remove_bind_mount
-    compose_up force
-    if wait_for_container; then
-      return 0
-    fi
-  fi
-
-  error "Container is not running: $CONTAINER_NAME. Start Marzban Node first, then run this command."
+  info "Container $CONTAINER_NAME does not exist. Creating it without starting the service..."
+  compose_exec create "$SERVICE_NAME"
+  container_exists || error "Compose create did not produce the expected container: $CONTAINER_NAME"
 }
 
-recover_from_readonly_or_bad_mount() {
-  warn "Container file is read-only and no valid host patch file is available."
-  warn "Recovering by removing the bind mount, recreating the container, and patching a fresh file..."
-  backup_compose
-  remove_bind_mount
-  compose_up force
-  wait_for_container || error "Container did not start after removing the bind mount."
+extract_image_rest_service() {
+  local destination="$1"
+  local temp_container=""
+
+  ensure_container_exists
+  CURRENT_IMAGE_ID="$(docker container inspect -f '{{.Image}}' "$CONTAINER_NAME")"
+  [ -n "$CURRENT_IMAGE_ID" ] || error "Could not determine image ID for $CONTAINER_NAME"
+
+  temp_container="$(docker create "$CURRENT_IMAGE_ID")" || error "Could not create temporary container from $CURRENT_IMAGE_ID"
+  if ! docker cp "$temp_container:/code/rest_service.py" "$destination"; then
+    docker rm -f "$temp_container" >/dev/null 2>&1 || true
+    error "Could not copy image-provided /code/rest_service.py"
+  fi
+  docker rm -f "$temp_container" >/dev/null
+}
+
+atomic_install_file() {
+  local source="$1"
+  local destination="$2"
+  local mode="$3"
+  local staged="$destination.tmp.$$"
+
+  install -m "$mode" -- "$source" "$staged"
+  mv -f -- "$staged" "$destination"
+}
+
+host_patch_file_is_valid() {
+  [ -f "$PATCH_FILE" ] || return 1
+  grep -Fq "marzban-node-stabilizer: lifecycle-hardening-v2" "$PATCH_FILE" || return 1
+  python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); compile(p.read_text(), str(p), "exec")' "$PATCH_FILE" >/dev/null 2>&1
+}
+
+metadata_value() {
+  local key="$1"
+  [ -f "$METADATA_FILE" ] || return 1
+  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$METADATA_FILE"
+}
+
+write_metadata() {
+  local source_sha="$1"
+  local patch_sha="$2"
+  local temp_metadata="$ACTIVE_TMP_DIR/metadata.env"
+
+  cat > "$temp_metadata" <<EOF
+PATCH_FORMAT_VERSION=2
+IMAGE_ID=$CURRENT_IMAGE_ID
+SOURCE_SHA256=$source_sha
+PATCH_SHA256=$patch_sha
+START_CONFIRM_SECONDS=$TIMEOUT_SECONDS
+RESTART_GRACE_SECONDS=$RESTART_GRACE_SECONDS
+APPLIED_AT_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  atomic_install_file "$temp_metadata" "$METADATA_FILE" 0644
+}
+
+rollback_apply() {
+  local previous_patch="$1"
+  local previous_original="$2"
+  local previous_metadata="$3"
+  local had_patch="$4"
+  local had_original="$5"
+  local had_metadata="$6"
+
+  restore_compose_backup
+
+  if [ "$had_patch" = "1" ]; then
+    atomic_install_file "$previous_patch" "$PATCH_FILE" 0644
+  else
+    rm -f -- "$PATCH_FILE"
+  fi
+
+  if [ "$had_original" = "1" ]; then
+    atomic_install_file "$previous_original" "$ORIGINAL_FILE" 0644
+  else
+    rm -f -- "$ORIGINAL_FILE"
+  fi
+
+  if [ "$had_metadata" = "1" ]; then
+    atomic_install_file "$previous_metadata" "$METADATA_FILE" 0644
+  else
+    rm -f -- "$METADATA_FILE"
+  fi
+
+  if compose_validate >/dev/null 2>&1; then
+    compose_up force >/dev/null 2>&1 || true
+  fi
+}
+
+wait_for_xray_or_timeout() {
+  local waited=0
+  while [ "$waited" -lt "$STARTUP_WAIT_SECONDS" ]; do
+    if ! container_is_running; then
+      return 1
+    fi
+    if docker exec "$CONTAINER_NAME" sh -c 'pgrep -x xray >/dev/null 2>&1' >/dev/null 2>&1; then
+      info "Xray process detected after ${waited}s."
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
 }
 
 apply_patch() {
   require_root
   check_os
+  normalize_settings
   check_requirements
-  mkdir -p "$PATCH_DIR"
+  check_apply_helpers
+  acquire_lock
+
+  mkdir -p -- "$PATCH_DIR"
+  ACTIVE_TMP_DIR="$(mktemp -d)"
 
   echo "[INFO] ${APP_NAME}"
   echo "[INFO] container: $CONTAINER_NAME"
   echo "[INFO] service:   $SERVICE_NAME"
   echo "[INFO] compose:   $COMPOSE_FILE"
   echo "[INFO] patch dir: $PATCH_DIR"
-  echo "[INFO] timeout:   $TIMEOUT_SECONDS seconds"
-  echo "[INFO] grace:     $RESTART_GRACE_SECONDS seconds"
+  echo "[INFO] startup confirmation max: $TIMEOUT_SECONDS seconds"
+  echo "[INFO] duplicate restart grace:  $RESTART_GRACE_SECONDS seconds"
   echo
 
-  ensure_container_running_or_recover
+  local source_file="$ACTIVE_TMP_DIR/rest_service.image.py"
+  local patched_file="$ACTIVE_TMP_DIR/rest_service.patched.py"
+  local source_sha patch_sha
+  local previous_patch="$ACTIVE_TMP_DIR/previous.patch"
+  local previous_original="$ACTIVE_TMP_DIR/previous.original"
+  local previous_metadata="$ACTIVE_TMP_DIR/previous.metadata"
+  local had_patch=0 had_original=0 had_metadata=0
 
-  if compose_has_rest_service_mount; then
-    info "Existing rest_service.py bind mount detected."
+  extract_image_rest_service "$source_file"
+  cp -- "$source_file" "$patched_file"
 
-    if host_patch_file_is_valid; then
-      info "Host patch file exists and is valid. Patching host file directly..."
-      patch_file_python "$PATCH_FILE"
-      backup_compose
-      add_bind_mount
-      info "Recreating container so the patched bind mount is active..."
-      compose_up force
-    else
-      recover_from_readonly_or_bad_mount
-      patch_container_file
-      copy_patch_to_host
-      backup_compose
-      add_bind_mount
-      info "Recreating container so bind mount becomes active..."
-      compose_up force
-    fi
-  else
-    if container_file_is_writable; then
-      patch_container_file
-      copy_patch_to_host
-    else
-      warn "Container file is not writable. Falling back to host patch flow..."
-      docker cp "$CONTAINER_NAME:/code/rest_service.py" "$PATCH_FILE"
-      chmod 644 "$PATCH_FILE"
-      patch_file_python "$PATCH_FILE"
-    fi
+  source_sha="$(sha256sum "$source_file" | awk '{print $1}')"
+  info "Image source SHA256: $source_sha"
 
-    backup_compose
-    add_bind_mount
-    info "Recreating container so bind mount becomes active..."
-    compose_up force
+  info "Applying reviewed node-side lifecycle patch..."
+  python3 "$PATCHER_PATH" \
+    --file "$patched_file" \
+    --timeout "$TIMEOUT_SECONDS" \
+    --grace "$RESTART_GRACE_SECONDS"
+  python3 -m py_compile "$patched_file"
+  patch_sha="$(sha256sum "$patched_file" | awk '{print $1}')"
+
+  if [ -f "$PATCH_FILE" ]; then cp -p -- "$PATCH_FILE" "$previous_patch"; had_patch=1; fi
+  if [ -f "$ORIGINAL_FILE" ]; then cp -p -- "$ORIGINAL_FILE" "$previous_original"; had_original=1; fi
+  if [ -f "$METADATA_FILE" ]; then cp -p -- "$METADATA_FILE" "$previous_metadata"; had_metadata=1; fi
+
+  backup_compose
+  add_bind_mount
+  if ! compose_validate; then
+    restore_compose_backup
+    error "Compose validation failed after adding the bind mount. No service recreate was attempted."
   fi
 
-  echo
-  info "Waiting ${STARTUP_WAIT_SECONDS} seconds for heavy Xray config startup..."
-  sleep "$STARTUP_WAIT_SECONDS"
-  show_status
+  if ! atomic_install_file "$source_file" "$ORIGINAL_FILE" 0644 \
+    || ! atomic_install_file "$patched_file" "$PATCH_FILE" 0644 \
+    || ! write_metadata "$source_sha" "$patch_sha"; then
+    warn "Could not install the new patch state; restoring previous stabilizer state."
+    rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"
+    error "Apply failed while installing patch files."
+  fi
+
+  info "Recreating only Compose service: $SERVICE_NAME"
+  if ! compose_up force; then
+    warn "Service recreation failed; restoring previous stabilizer state."
+    rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"
+    error "Apply failed and rollback was attempted."
+  fi
+
+  if ! wait_for_container; then
+    warn "Container did not remain running; restoring previous stabilizer state."
+    rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"
+    error "Apply failed because the container did not become healthy enough to remain running."
+  fi
+
+  if [ "$STARTUP_WAIT_SECONDS" -gt 0 ]; then
+    info "Waiting up to ${STARTUP_WAIT_SECONDS}s for Xray; this exits early when Xray appears."
+    if ! wait_for_xray_or_timeout; then
+      warn "Xray was not observed within ${STARTUP_WAIT_SECONDS}s. The node service is running; Panel connection/start may still be pending."
+    fi
+  fi
+
+  show_status_core
 
   echo
-  echo "[DONE] Patch applied."
-  echo "This command is safe to run again if it was interrupted or failed halfway."
+  echo "[DONE] Patch applied from the current container image source."
+  echo "Re-running apply is safe; the patch is rebuilt from the image-provided source each time."
 }
 
-show_status() {
-  require_root
-  check_requirements
-
+show_status_core() {
   echo
-  echo "[INFO] Docker container:"
-  docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+  echo "[INFO] Container state:"
+  if container_exists; then
+    docker container inspect "$CONTAINER_NAME" --format 'Name={{.Name}} State={{.State.Status}} Running={{.State.Running}} RestartCount={{.RestartCount}} OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}' || true
+  else
+    echo "Container not found: $CONTAINER_NAME"
+  fi
 
   echo
   echo "[INFO] Compose mount state:"
   if compose_has_rest_service_mount; then
-    grep "/code/rest_service.py" "$COMPOSE_FILE" || true
+    grep -F "/code/rest_service.py" "$COMPOSE_FILE" || true
   else
     echo "No rest_service.py bind mount found."
   fi
@@ -535,35 +461,143 @@ show_status() {
   echo
   echo "[INFO] Host patch file:"
   if host_patch_file_is_valid; then
-    echo "$PATCH_FILE is present and valid."
+    echo "$PATCH_FILE is present, marked, and syntactically valid."
   else
-    echo "$PATCH_FILE is missing or invalid."
+    echo "$PATCH_FILE is missing, unrecognized, or invalid."
   fi
 
   echo
-  echo "[INFO] Xray process inside container:"
-  docker exec "$CONTAINER_NAME" sh -c 'pgrep -a xray || true' || true
+  echo "[INFO] Patch metadata:"
+  if [ -f "$METADATA_FILE" ]; then
+    cat "$METADATA_FILE"
+  else
+    echo "No patch metadata found."
+  fi
+
+  if container_is_running; then
+    echo
+    echo "[INFO] Xray process inside container:"
+    docker exec "$CONTAINER_NAME" sh -c 'pgrep -a xray || true' || true
+
+    echo
+    echo "[INFO] Listening ports inside container:"
+    docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray|62050|62051' || true" || true
+  fi
 
   echo
-  echo "[INFO] Listening ports inside container:"
-  docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray|62050|62051' || true" || true
+  echo "[INFO] Recent container logs:"
+  docker logs --tail=80 "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+show_status() {
+  require_root
+  check_os
+  normalize_settings
+  check_requirements
+  show_status_core
+}
+
+diagnose_runtime_health() {
+  echo
+  echo "[INFO] Runtime health classification:"
+
+  if ! container_exists; then
+    echo "container-unavailable: container does not exist"
+    return 0
+  fi
+  if ! container_is_running; then
+    echo "container-unavailable: container exists but is not running"
+    return 0
+  fi
+  if ! docker exec "$CONTAINER_NAME" sh -c 'pgrep -x xray >/dev/null 2>&1' >/dev/null 2>&1; then
+    echo "xray-unavailable: container is running but the Xray process was not detected"
+    return 0
+  fi
+
+  if docker exec "$CONTAINER_NAME" sh -c 'command -v ss >/dev/null 2>&1' >/dev/null 2>&1; then
+    if docker exec "$CONTAINER_NAME" sh -c "ss -lnt 2>/dev/null | grep -Eq '[:.]62051([[:space:]]|$)'" >/dev/null 2>&1; then
+      echo "basic-ready: Xray is running and the default API listener (62051) is present"
+      echo "note: this does not prove end-to-end Panel reachability"
+    else
+      echo "xray-api-unready: Xray is running but the default API listener (62051) was not detected"
+    fi
+  else
+    echo "readiness-unknown: Xray is running but 'ss' is unavailable inside the container"
+  fi
+}
+
+show_diagnostics() {
+  require_root
+  check_os
+  normalize_settings
+  check_requirements
+  show_status_core
+  diagnose_runtime_health
 
   echo
-  echo "[INFO] Recent logs:"
-  docker logs --tail=80 "$CONTAINER_NAME" || true
+  echo "[INFO] Upstream source identity check:"
+  if ! container_exists; then
+    echo "Cannot inspect image source because the container does not exist."
+  else
+    ACTIVE_TMP_DIR="$(mktemp -d)"
+    local source_file="$ACTIVE_TMP_DIR/rest_service.image.py"
+    local current_source_sha stored_source_sha stored_image_id
+    extract_image_rest_service "$source_file"
+    current_source_sha="$(sha256sum "$source_file" | awk '{print $1}')"
+    stored_source_sha="$(metadata_value SOURCE_SHA256 || true)"
+    stored_image_id="$(metadata_value IMAGE_ID || true)"
+
+    echo "Current image ID:       $CURRENT_IMAGE_ID"
+    echo "Applied image ID:       ${stored_image_id:-unknown}"
+    echo "Current source SHA256:  $current_source_sha"
+    echo "Applied source SHA256:  ${stored_source_sha:-unknown}"
+
+    if [ -n "$stored_source_sha" ] && [ "$stored_source_sha" = "$current_source_sha" ]; then
+      echo "Source drift:           no"
+    else
+      echo "Source drift:           YES/unknown - run apply only after compatibility review if upstream changed"
+    fi
+  fi
+
+  echo
+  echo "[INFO] Restart/session-focused recent logs:"
+  docker logs --tail=300 "$CONTAINER_NAME" 2>/dev/null \
+    | grep -Ei 'connect|disconnect|session|restart|stopp|xray|403|error|fail' \
+    | tail -n 120 || true
 }
 
 restore_patch() {
   require_root
   check_os
+  normalize_settings
   check_requirements
+  check_compose_editor
+  acquire_lock
+
+  ACTIVE_TMP_DIR="$(mktemp -d)"
+  local previous_compose="$ACTIVE_TMP_DIR/compose.before-restore"
+  cp -p -- "$COMPOSE_FILE" "$previous_compose"
+
   backup_compose
   remove_bind_mount
-  info "Recreating container without bind mount..."
-  compose_up force
+  if ! compose_validate; then
+    cp -p -- "$previous_compose" "$COMPOSE_FILE"
+    error "Compose validation failed after removing the bind mount; original Compose file restored."
+  fi
+
+  info "Recreating only Compose service without stabilizer bind mount: $SERVICE_NAME"
+  if ! compose_up force || ! wait_for_container; then
+    warn "Restore recreate failed; restoring the previous Compose state."
+    cp -p -- "$previous_compose" "$COMPOSE_FILE"
+    if compose_validate >/dev/null 2>&1; then
+      compose_up force >/dev/null 2>&1 || true
+    fi
+    error "Restore failed and previous Compose state was reinstated."
+  fi
+
   echo
   echo "[DONE] Restore completed."
-  echo "The compose bind mount was removed. Marzban Node should now use its original image file."
+  echo "The bind mount was removed. Marzban Node is using the image-provided rest_service.py."
 }
 
 COMMAND="${1:-help}"
@@ -571,6 +605,7 @@ COMMAND="${1:-help}"
 case "$COMMAND" in
   apply) apply_patch ;;
   status) show_status ;;
+  diagnose) show_diagnostics ;;
   restore) restore_patch ;;
   help|-h|--help) usage ;;
   *) usage; exit 1 ;;
