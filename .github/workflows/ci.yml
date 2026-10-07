@@ -25,6 +25,7 @@ jobs:
           bash -n install.sh
           bash -n bin/marzban-node-stabilizer
           bash -n tests/test_shell_logic.sh
+          bash -n tests/test_installer_snapshot.sh
           bash -n tests/test_docker_runtime.sh
 
       - name: Install ShellCheck
@@ -33,10 +34,12 @@ jobs:
           sudo apt-get install -y shellcheck
 
       - name: ShellCheck
-        run: shellcheck -x install.sh bin/marzban-node-stabilizer tests/test_docker_runtime.sh
+        run: shellcheck -x install.sh bin/marzban-node-stabilizer tests/test_installer_snapshot.sh tests/test_docker_runtime.sh
 
       - name: Shell behavior tests
-        run: bash tests/test_shell_logic.sh
+        run: |
+          bash tests/test_shell_logic.sh
+          bash tests/test_installer_snapshot.sh
 
       - name: Python syntax
         run: python3 -m py_compile lib/patch_rest_service.py lib/compose_mount.py
