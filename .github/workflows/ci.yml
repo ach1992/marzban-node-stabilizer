@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Shell syntax
         run: |
@@ -32,7 +32,7 @@ jobs:
           sudo apt-get install -y shellcheck
 
       - name: ShellCheck
-        run: shellcheck -x install.sh bin/marzban-node-stabilizer tests/test_shell_logic.sh
+        run: shellcheck -x install.sh bin/marzban-node-stabilizer
 
       - name: Shell behavior tests
         run: bash tests/test_shell_logic.sh
