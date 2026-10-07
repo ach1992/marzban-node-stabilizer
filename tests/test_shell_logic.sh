@@ -15,7 +15,7 @@ RESTART_GRACE_SECONDS=60
 STARTUP_WAIT_SECONDS=70
 START_WAIT_SECONDS=15
 normalize_settings >/dev/null 2>&1
-[ "$TIMEOUT_SECONDS" = "8" ] || fail "TIMEOUT_SECONDS was not clamped to 8"
+[ "$TIMEOUT_SECONDS" = "7" ] || fail "TIMEOUT_SECONDS was not clamped to 7"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT

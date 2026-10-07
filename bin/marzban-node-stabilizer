@@ -30,7 +30,7 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7}"
 RESTART_GRACE_SECONDS="${RESTART_GRACE_SECONDS:-60}"
 STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-70}"
 START_WAIT_SECONDS="${START_WAIT_SECONDS:-15}"
-REQUEST_WAIT_CAP_SECONDS=8
+REQUEST_WAIT_CAP_SECONDS=7
 LOCK_FILE="${LOCK_FILE:-/run/lock/marzban-node-stabilizer.lock}"
 
 LAST_COMPOSE_BACKUP=""
@@ -75,7 +75,7 @@ Environment variables:
   SERVICE_NAME            Default: marzban-node
   COMPOSE_FILE            Default: /opt/marzban-node/docker-compose.yml
   PATCH_DIR               Default: /opt/marzban-node-patches
-  TIMEOUT_SECONDS         Default: 7 (values above 8 are clamped for current caller compatibility)
+  TIMEOUT_SECONDS         Default: 7 (values above 7 are clamped for current caller compatibility)
   RESTART_GRACE_SECONDS   Default: 60
   STARTUP_WAIT_SECONDS    Default: 70 (maximum wait; exits early when Xray is seen)
   START_WAIT_SECONDS      Default: 15

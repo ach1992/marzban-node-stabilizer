@@ -23,10 +23,12 @@ The patch is designed to:
 - deduplicate only same-config restarts during the startup grace period;
 - never silently drop a materially different requested Xray config;
 - use monotonic time for grace-period calculations;
-- serialize lifecycle transitions and reject stale-session disconnects;
+- serialize lifecycle transitions without holding the lifecycle lock through readiness polling;
+- use lifecycle generations so superseded start/restart completions cannot overwrite newer session/core state;
 - preserve upstream session-takeover behavior while preventing an older session from tearing down the newer one;
 - fail closed if the upstream methods being replaced have changed unexpectedly;
-- record the source/image identity used to build the active patch;
+- record the source/image identity used to build the active patch and verify the recreated container image still matches it;
+- rebase once onto a different compatible recreated image, otherwise disable the stale mount and fail closed;
 - validate Docker Compose before service recreation;
 - prevent concurrent `apply`/`restore` operations with a host lock;
 - recreate only the configured Marzban Node Compose service.
@@ -76,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/mai
   bash
 ```
 
-`TIMEOUT_SECONDS` is the maximum node-side confirmation wait. The current implementation clamps values above `8` seconds to keep the node response inside the current upstream caller budget. The loop exits earlier as soon as Xray readiness is observed.
+`TIMEOUT_SECONDS` is the maximum node-side confirmation wait. The current implementation clamps values above `7` seconds, leaving margin inside the current 10-second upstream start/restart request budget for config transformation and core process work. The loop exits earlier as soon as Xray readiness is observed.
 
 `RESTART_GRACE_SECONDS` controls same-config restart deduplication. A different config is never ignored because of the grace period.
 
@@ -116,7 +118,7 @@ This command does not restart the Marzban Node service.
 sudo marzban-node-stabilizer restore
 ```
 
-Restore removes the stabilizer bind mount, validates the resulting Compose configuration, and recreates only the configured service. If recreation fails, it attempts to reinstate the previous Compose state.
+Restore removes only a bind mount whose Stabilizer ownership is verified from its path, patch marker, metadata, and patch hash. Foreign `/code/rest_service.py` mounts are refused without mutation. The resulting Compose configuration is validated before recreating only the configured service; rollback recreation is verified and secondary recovery failure is reported explicitly.
 
 ## Uninstall
 
@@ -151,7 +153,7 @@ Custom paths change the corresponding entries.
 
 The source transformer deliberately refuses to replace lifecycle methods whose reviewed upstream shape has changed. This is intentional: an upstream change must be reviewed before this project overwrites it.
 
-If `apply` finds that the current image changed incompatibly while the Stabilizer mount is active, it disables that stale mount so the old host copy cannot mask the new image source. Review the new upstream source and update the transformer/tests before applying the Stabilizer again.
+After recreation, `apply` verifies the actual container image identity against the image used to build the patch. If recreation resolves to a different compatible image, the patch is rebuilt from that image and the service is recreated once more. If the new source is incompatible or the image changes again, stale-mount disablement is attempted and `apply` fails instead of reporting success with an old host copy masking the current image source.
 
 ## Development and project scope
 
