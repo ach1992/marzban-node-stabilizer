@@ -13,8 +13,11 @@ ORIGINAL_FILE="${ORIGINAL_FILE:-$PATCH_DIR/rest_service.py.original_backup}"
 METADATA_FILE="${METADATA_FILE:-$PATCH_DIR/metadata.env}"
 
 INSTALLED_LIB_DIR="${INSTALLED_LIB_DIR:-/usr/local/lib/marzban-node-stabilizer}"
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_LIB_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/../lib" 2>/dev/null && pwd || true)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_LIB_DIR=""
+if [ -d "$SCRIPT_DIR/../lib" ]; then
+  REPO_LIB_DIR="$(cd -- "$SCRIPT_DIR/../lib" && pwd)"
+fi
 if [ -n "$REPO_LIB_DIR" ] && [ -f "$REPO_LIB_DIR/patch_rest_service.py" ]; then
   PATCHER_PATH="${PATCHER_PATH:-$REPO_LIB_DIR/patch_rest_service.py}"
   COMPOSE_EDITOR_PATH="${COMPOSE_EDITOR_PATH:-$REPO_LIB_DIR/compose_mount.py}"
