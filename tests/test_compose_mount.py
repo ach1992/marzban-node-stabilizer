@@ -321,6 +321,21 @@ services:
 """
         self.assert_layout_rejected_everywhere(text)
 
+    def test_all_anonymous_target_only_volumes_fail_closed(self):
+        for target in (
+            "/data",
+            "/code",
+            "/code/rest_service.py",
+            "/code/./rest_service.py",
+        ):
+            text = f"""services:
+  marzban-node:
+    volumes:
+      - {target}
+"""
+            with self.subTest(target=target):
+                self.assert_layout_rejected_everywhere(text)
+
     def test_inline_comment_on_supported_short_syntax_is_classified_safely(self):
         text = """services:
   marzban-node:
