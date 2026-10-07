@@ -16,7 +16,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -25,6 +25,7 @@ jobs:
           bash -n install.sh
           bash -n bin/marzban-node-stabilizer
           bash -n tests/test_shell_logic.sh
+          bash -n tests/test_docker_runtime.sh
 
       - name: Install ShellCheck
         run: |
@@ -32,7 +33,7 @@ jobs:
           sudo apt-get install -y shellcheck
 
       - name: ShellCheck
-        run: shellcheck -x install.sh bin/marzban-node-stabilizer
+        run: shellcheck -x install.sh bin/marzban-node-stabilizer tests/test_shell_logic.sh tests/test_docker_runtime.sh
 
       - name: Shell behavior tests
         run: bash tests/test_shell_logic.sh
@@ -42,3 +43,6 @@ jobs:
 
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+
+      - name: Docker runtime and current upstream image compatibility
+        run: sudo bash tests/test_docker_runtime.sh
