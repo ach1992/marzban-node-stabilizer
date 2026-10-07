@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: |
+          bash -n install.sh
+          bash -n bin/marzban-node-stabilizer
+          bash -n tests/test_shell_logic.sh
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+
+      - name: ShellCheck
+        run: shellcheck -x install.sh bin/marzban-node-stabilizer tests/test_shell_logic.sh
+
+      - name: Shell behavior tests
+        run: bash tests/test_shell_logic.sh
+
+      - name: Python syntax
+        run: python3 -m py_compile lib/patch_rest_service.py lib/compose_mount.py
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
