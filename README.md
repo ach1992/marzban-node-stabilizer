@@ -35,7 +35,7 @@ The patch is designed to:
 
 The patched file is persisted with a Docker Compose bind mount so normal container recreation keeps the stabilization active.
 
-For safety, the Compose editor deliberately supports only a narrow representation it can classify without ambiguity: a block-style service `volumes:` list made of single-line short-syntax entries. Mapping/long syntax, flow/alias/anchor layouts, interpolation, anonymous exact `/code/rest_service.py` targets, and other ambiguous forms are refused before mutation rather than partially rewritten.
+For safety, the Compose editor deliberately supports only a narrow representation it can classify without ambiguity. The root `services` mapping and selected service must use literal block mappings with plain unquoted keys; top-level `include`, YAML merge/service composition, Compose `extends`, `volumes_from`, `configs`, `secrets`, `tmpfs`, `devices`, quoted/explicit semantic keys, and other unclassified service-composition forms are refused before mutation. Within the selected service, `volumes:` must be a block list of single-line short-syntax entries. Mapping/long syntax, flow/alias/anchor layouts, interpolation, anonymous exact `/code/rest_service.py` targets, and other ambiguous volume forms are also refused rather than partially rewritten.
 
 ## Supported OS
 
@@ -102,7 +102,7 @@ sudo marzban-node-stabilizer apply
 sudo marzban-node-stabilizer status
 ```
 
-Shows container state, bind-mount state, patch metadata, Xray process/listeners when available, and recent logs. Listener diagnostics read the effective `SERVICE_PORT` and `XRAY_API_PORT` from the running container environment, falling back to Marzban Node defaults only when those variables are unset.
+Shows container state, bind-mount state, patch metadata, Xray process/listeners when available, and recent logs. Listener diagnostics read the effective `SERVICE_PORT` and `XRAY_API_PORT` from the running container environment, falling back to Marzban Node defaults only when those variables are genuinely absent. Explicitly empty/invalid values or an inspection failure are reported as unknown/invalid rather than silently replaced with defaults.
 
 ## Diagnose intermittent failures
 
