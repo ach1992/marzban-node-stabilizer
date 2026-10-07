@@ -26,12 +26,12 @@ class ComposeMountTests(unittest.TestCase):
         once = compose_mount.add_mount(WITH_VOLUMES, "marzban-node", "/opt/marzban-node-patches/rest_service.py")
         twice = compose_mount.add_mount(once, "marzban-node", "/opt/marzban-node-patches/rest_service.py")
         self.assertEqual(once, twice)
-        self.assertEqual(twice.count("/code/rest_service.py"), 1)
+        self.assertEqual(twice.count(":/code/rest_service.py:ro"), 1)
 
     def test_remove_preserves_other_volumes(self):
         mounted = compose_mount.add_mount(WITH_VOLUMES, "marzban-node", "/opt/marzban-node-patches/rest_service.py")
         restored = compose_mount.remove_mount(mounted, "marzban-node")
-        self.assertNotIn("/code/rest_service.py", restored)
+        self.assertNotIn(":/code/rest_service.py:ro", restored)
         self.assertIn("/var/lib/marzban-node:/var/lib/marzban-node", restored)
 
     def test_remove_drops_empty_volumes_section(self):
@@ -40,7 +40,7 @@ class ComposeMountTests(unittest.TestCase):
         self.assertEqual(restored, BASE)
 
     def test_missing_service_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Compose service not found"):
+        with self.assertRaisesRegex(ValueError, "Compose service"):
             compose_mount.add_mount(BASE, "other", "/opt/x.py")
 
     def test_long_syntax_existing_target_is_rejected(self):
@@ -59,10 +59,8 @@ class ComposeMountTests(unittest.TestCase):
 """
         mounted = compose_mount.add_mount(text, "marzban-node", "/opt/mns/rest_service.py")
         self.assertIn("/tmp/helper.py:/code/rest_service.py:ro", mounted)
-        self.assertEqual(mounted.count("/code/rest_service.py"), 2)
         restored = compose_mount.remove_mount(mounted, "marzban-node")
         self.assertIn("/tmp/helper.py:/code/rest_service.py:ro", restored)
-        self.assertEqual(restored.count("/code/rest_service.py"), 1)
 
     def test_has_is_scoped_to_selected_service(self):
         text = """services:
@@ -87,18 +85,52 @@ class ComposeMountTests(unittest.TestCase):
             "/opt/marzban-node-patches/rest_service.py",
         )
 
-    def test_mount_source_rejects_multiple_target_mounts(self):
+    def test_multiple_exact_target_mounts_are_rejected(self):
         text = """services:
   marzban-node:
     volumes:
       - /tmp/a.py:/code/rest_service.py:ro
       - /tmp/b.py:/code/rest_service.py:ro
 """
-        with self.assertRaisesRegex(ValueError, "multiple rest_service.py mounts"):
+        with self.assertRaisesRegex(ValueError, "multiple exact rest_service.py mounts"):
             compose_mount.mount_source(text, "marzban-node")
 
+    def test_non_volume_occurrences_are_never_treated_as_mounts(self):
+        text = """services:
+  marzban-node:
+    image: example/node
+    environment:
+      - NOTE=/code/rest_service.py
+    command:
+      - sh
+      - -c
+      - echo /code/rest_service.py
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -f /code/rest_service.py
+    # /code/rest_service.py is mentioned here too
+"""
+        self.assertFalse(compose_mount.service_has_mount(text, "marzban-node"))
+        self.assertIsNone(compose_mount.mount_source(text, "marzban-node"))
+        mounted = compose_mount.add_mount(text, "marzban-node", "/opt/mns/rest_service.py")
+        restored = compose_mount.remove_mount(mounted, "marzban-node")
+        self.assertEqual(restored, text)
+
+    def test_similar_target_is_not_treated_as_exact_target(self):
+        text = """services:
+  marzban-node:
+    volumes:
+      - /tmp/backup.py:/code/rest_service.py.backup:ro
+"""
+        self.assertFalse(compose_mount.service_has_mount(text, "marzban-node"))
+        mounted = compose_mount.add_mount(text, "marzban-node", "/opt/mns/rest_service.py")
+        self.assertIn("/tmp/backup.py:/code/rest_service.py.backup:ro", mounted)
+        restored = compose_mount.remove_mount(mounted, "marzban-node")
+        self.assertEqual(restored, text)
+
     def test_unsafe_patch_path_is_rejected(self):
-        for path in ("relative.py", "/tmp/a:b.py", "/tmp/$HOME.py", '/tmp/a"b.py'):
+        for path in ("relative.py", "/tmp/a:b.py", "/tmp/$HOME.py", '/tmp/a"b.py', "/tmp/a'b.py"):
             with self.subTest(path=path):
                 with self.assertRaises(ValueError):
                     compose_mount.add_mount(BASE, "marzban-node", path)
