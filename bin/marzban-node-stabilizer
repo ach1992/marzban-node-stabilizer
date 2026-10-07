@@ -750,28 +750,43 @@ restore_patch() {
 
   ACTIVE_TMP_DIR="$(mktemp -d)"
   local previous_compose="$ACTIVE_TMP_DIR/compose.before-restore"
-  cp -p -- "$COMPOSE_FILE" "$previous_compose"
+  local existing_mount_source=""
 
+  if ! existing_mount_source="$(compose_mount_source)"; then
+    error "Could not safely inspect the existing rest_service.py mount for service $SERVICE_NAME."
+  fi
+  if [ -z "$existing_mount_source" ]; then
+    info "No /code/rest_service.py mount is active for $SERVICE_NAME; nothing to restore."
+    return 0
+  fi
+  if [ "$existing_mount_source" != "$PATCH_FILE" ]; then
+    error "Refusing restore: /code/rest_service.py is owned by a foreign mount source: $existing_mount_source"
+  fi
+  if ! verify_stabilizer_mount_identity "$existing_mount_source"; then
+    error "Refusing restore: expected Stabilizer mount path is present but marker/metadata/hash ownership could not be verified."
+  fi
+
+  cp -p -- "$COMPOSE_FILE" "$previous_compose"
   backup_compose
   remove_bind_mount
   if ! compose_validate; then
     cp -p -- "$previous_compose" "$COMPOSE_FILE"
-    error "Compose validation failed after removing the bind mount; original Compose file restored."
+    error "Compose validation failed after removing the bind mount; original Compose file restored and runtime was not recreated."
   fi
 
   info "Recreating only Compose service without stabilizer bind mount: $SERVICE_NAME"
   if ! compose_up force || ! wait_for_container; then
-    warn "Restore recreate failed; restoring the previous Compose state."
+    warn "Restore recreate failed; restoring the previous Compose/runtime state."
     cp -p -- "$previous_compose" "$COMPOSE_FILE"
-    if compose_validate >/dev/null 2>&1; then
-      compose_up force >/dev/null 2>&1 || true
+    if recover_service_after_compose_restore; then
+      error "Restore failed; previous Compose/runtime state was recovered."
     fi
-    error "Restore failed and previous Compose state was reinstated."
+    error "Restore failed and rollback runtime recovery FAILED. Previous Compose was restored on disk. Backup: $LAST_COMPOSE_BACKUP"
   fi
 
   echo
   echo "[DONE] Restore completed."
-  echo "The bind mount was removed. Marzban Node is using the image-provided rest_service.py."
+  echo "The verified Stabilizer bind mount was removed. Marzban Node is using the image-provided rest_service.py."
 }
 
 COMMAND="${1:-help}"
