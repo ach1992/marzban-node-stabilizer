@@ -243,13 +243,15 @@ after="$(monotonic_ms)"
 wait "$START_PID"
 [ "$(cat "$TMP/start-connect.code")" = "200" ] || {
   cat "$TMP/start-connect.body" >&2
-  fail "superseded start did not return the current state successfully"
+  fail "superseded start did not complete without a caller-error path"
 }
-python3 - "$TMP/start-connect.body" <<'PY2'
+api_request "/" '{}' "$TMP/state-after-connect.body" "$TMP/state-after-connect.code" 4
+[ "$(cat "$TMP/state-after-connect.code")" = "200" ] || fail "could not read state after connect superseded start"
+python3 - "$TMP/state-after-connect.body" <<'PY2'
 import json, sys
 body = json.load(open(sys.argv[1]))
-assert body["connected"] is True
-assert body["started"] is False
+assert body["connected"] is True, body
+assert body["started"] is False, body
 PY2
 
 # Disconnect must also remain inside its 3-second upstream caller budget.
@@ -259,12 +261,14 @@ START_PID=$!
 sleep 3.2
 assert_fast_request "/disconnect" "$(session_payload "$SESSION_2")" 2500 "disconnect-during-start"
 wait "$START_PID"
-[ "$(cat "$TMP/start-disconnect.code")" = "200" ] || fail "superseded start did not return current disconnected state"
-python3 - "$TMP/start-disconnect.body" <<'PY2'
+[ "$(cat "$TMP/start-disconnect.code")" = "200" ] || fail "superseded start did not complete without a caller-error path"
+api_request "/" '{}' "$TMP/state-after-disconnect.body" "$TMP/state-after-disconnect.code" 4
+[ "$(cat "$TMP/state-after-disconnect.code")" = "200" ] || fail "could not read state after disconnect superseded start"
+python3 - "$TMP/state-after-disconnect.body" <<'PY2'
 import json, sys
 body = json.load(open(sys.argv[1]))
-assert body["connected"] is False
-assert body["started"] is False
+assert body["connected"] is False, body
+assert body["started"] is False, body
 PY2
 
 # Establish a running core, then prove stop is not held behind restart readiness.
@@ -281,12 +285,14 @@ RESTART_PID=$!
 sleep 3.2
 assert_fast_request "/stop" "$(session_payload "$SESSION_3")" 3500 "stop-during-restart"
 wait "$RESTART_PID"
-[ "$(cat "$TMP/restart-stop.code")" = "200" ] || fail "superseded restart did not return current stopped state"
-python3 - "$TMP/restart-stop.body" <<'PY2'
+[ "$(cat "$TMP/restart-stop.code")" = "200" ] || fail "superseded restart did not complete without a caller-error path"
+api_request "/" '{}' "$TMP/state-after-stop.body" "$TMP/state-after-stop.code" 4
+[ "$(cat "$TMP/state-after-stop.code")" = "200" ] || fail "could not read state after stop superseded restart"
+python3 - "$TMP/state-after-stop.body" <<'PY2'
 import json, sys
 body = json.load(open(sys.argv[1]))
-assert body["connected"] is True
-assert body["started"] is False
+assert body["connected"] is True, body
+assert body["started"] is False, body
 PY2
 
 # Positive restore: owned mount is removed and image-provided source becomes visible.
