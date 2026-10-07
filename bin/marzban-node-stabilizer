@@ -36,6 +36,8 @@ LOCK_FILE="${LOCK_FILE:-/run/lock/marzban-node-stabilizer.lock}"
 LAST_COMPOSE_BACKUP=""
 ACTIVE_TMP_DIR=""
 CURRENT_IMAGE_ID=""
+BUILD_SOURCE_SHA=""
+BUILD_PATCH_SHA=""
 
 info() {
   echo "[INFO] $*"
@@ -412,6 +414,83 @@ disable_stale_stabilizer_mount_after_incompatibility() {
   return 0
 }
 
+build_patch_from_image() {
+  local image_id="$1"
+  local source_file="$2"
+  local patched_file="$3"
+
+  CURRENT_IMAGE_ID="$image_id"
+  BUILD_SOURCE_SHA=""
+  BUILD_PATCH_SHA=""
+
+  if ! extract_rest_service_from_image "$image_id" "$source_file"; then
+    warn "Could not extract /code/rest_service.py from image $image_id"
+    return 1
+  fi
+  cp -- "$source_file" "$patched_file"
+  BUILD_SOURCE_SHA="$(sha256sum "$source_file" | awk '{print $1}')"
+  info "Image source SHA256: $BUILD_SOURCE_SHA"
+
+  info "Applying reviewed node-side lifecycle patch..."
+  if ! python3 "$PATCHER_PATH" \
+    --file "$patched_file" \
+    --timeout "$TIMEOUT_SECONDS" \
+    --grace "$RESTART_GRACE_SECONDS"; then
+    return 1
+  fi
+  python3 -m py_compile "$patched_file" || return 1
+  BUILD_PATCH_SHA="$(sha256sum "$patched_file" | awk '{print $1}')"
+}
+
+reconcile_running_image_patch() {
+  local expected_image_id="$1"
+  local actual_image_id final_image_id
+  local source_file="$ACTIVE_TMP_DIR/rest_service.rebase.image.py"
+  local patched_file="$ACTIVE_TMP_DIR/rest_service.rebase.patched.py"
+
+  actual_image_id="$(container_image_id)"
+  [ -n "$actual_image_id" ] || {
+    warn "Could not determine the recreated container image ID."
+    return 1
+  }
+  if [ "$actual_image_id" = "$expected_image_id" ]; then
+    return 0
+  fi
+
+  warn "Service image changed during recreate: expected $expected_image_id, running $actual_image_id. Rebasing the patch to the running image."
+  if ! build_patch_from_image "$actual_image_id" "$source_file" "$patched_file"; then
+    warn "The recreated image is incompatible with the reviewed transformer; disabling the stale mount."
+    disable_stale_stabilizer_mount_after_incompatibility || true
+    return 1
+  fi
+
+  if ! atomic_install_file "$source_file" "$ORIGINAL_FILE" 0644 \
+    || ! atomic_install_file "$patched_file" "$PATCH_FILE" 0644 \
+    || ! write_metadata "$BUILD_SOURCE_SHA" "$BUILD_PATCH_SHA"; then
+    warn "Could not install the patch rebased to $actual_image_id; disabling the stale mount."
+    disable_stale_stabilizer_mount_after_incompatibility || true
+    return 1
+  fi
+
+  info "Recreating $SERVICE_NAME once more with the patch rebased to $actual_image_id"
+  if ! compose_up force || ! wait_for_container; then
+    warn "Recreate after image rebase failed; disabling the stale mount."
+    disable_stale_stabilizer_mount_after_incompatibility || true
+    return 1
+  fi
+
+  final_image_id="$(container_image_id)"
+  if [ -z "$final_image_id" ] || [ "$final_image_id" != "$actual_image_id" ]; then
+    warn "Service image changed again during rebase (expected $actual_image_id, got ${final_image_id:-unknown}); disabling the stale mount."
+    disable_stale_stabilizer_mount_after_incompatibility || true
+    return 1
+  fi
+
+  CURRENT_IMAGE_ID="$actual_image_id"
+  info "Patch source identity now matches the running image: $CURRENT_IMAGE_ID"
+  return 0
+}
+
 wait_for_xray_or_timeout() {
   local waited=0
   while [ "$waited" -lt "$STARTUP_WAIT_SECONDS" ]; do
@@ -463,17 +542,11 @@ apply_patch() {
     error "Refusing to replace an existing rest_service.py mount not owned by this stabilizer: $existing_mount_source"
   fi
 
-  extract_image_rest_service "$source_file"
-  cp -- "$source_file" "$patched_file"
+  ensure_container_exists
+  CURRENT_IMAGE_ID="$(container_image_id)"
+  [ -n "$CURRENT_IMAGE_ID" ] || error "Could not determine image ID for $CONTAINER_NAME"
 
-  source_sha="$(sha256sum "$source_file" | awk '{print $1}')"
-  info "Image source SHA256: $source_sha"
-
-  info "Applying reviewed node-side lifecycle patch..."
-  if ! python3 "$PATCHER_PATH" \
-    --file "$patched_file" \
-    --timeout "$TIMEOUT_SECONDS" \
-    --grace "$RESTART_GRACE_SECONDS"; then
+  if ! build_patch_from_image "$CURRENT_IMAGE_ID" "$source_file" "$patched_file"; then
     if [ -n "$existing_mount_source" ]; then
       warn "Current image source is incompatible with the reviewed stabilizer patch."
       if disable_stale_stabilizer_mount_after_incompatibility; then
@@ -483,8 +556,8 @@ apply_patch() {
     fi
     error "Apply stopped: current image source is incompatible with the reviewed stabilizer patch. No stabilizer mount was active."
   fi
-  python3 -m py_compile "$patched_file"
-  patch_sha="$(sha256sum "$patched_file" | awk '{print $1}')"
+  source_sha="$BUILD_SOURCE_SHA"
+  patch_sha="$BUILD_PATCH_SHA"
 
   if [ -f "$PATCH_FILE" ]; then cp -p -- "$PATCH_FILE" "$previous_patch"; had_patch=1; fi
   if [ -f "$ORIGINAL_FILE" ]; then cp -p -- "$ORIGINAL_FILE" "$previous_original"; had_original=1; fi
@@ -501,21 +574,31 @@ apply_patch() {
     || ! atomic_install_file "$patched_file" "$PATCH_FILE" 0644 \
     || ! write_metadata "$source_sha" "$patch_sha"; then
     warn "Could not install the new patch state; restoring previous stabilizer state."
-    rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"
-    error "Apply failed while installing patch files."
+    if rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"; then
+      error "Apply failed while installing patch files; previous Compose/runtime state was recovered."
+    fi
+    error "Apply failed while installing patch files and rollback runtime recovery FAILED. Backup: $LAST_COMPOSE_BACKUP"
   fi
 
   info "Recreating only Compose service: $SERVICE_NAME"
   if ! compose_up force; then
     warn "Service recreation failed; restoring previous stabilizer state."
-    rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"
-    error "Apply failed and rollback was attempted."
+    if rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"; then
+      error "Apply failed during service recreation; previous Compose/runtime state was recovered."
+    fi
+    error "Apply failed during service recreation and rollback runtime recovery FAILED. Backup: $LAST_COMPOSE_BACKUP"
   fi
 
   if ! wait_for_container; then
     warn "Container did not remain running; restoring previous stabilizer state."
-    rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"
-    error "Apply failed because the container did not become healthy enough to remain running."
+    if rollback_apply "$previous_patch" "$previous_original" "$previous_metadata" "$had_patch" "$had_original" "$had_metadata"; then
+      error "Apply failed because the container did not become running; previous Compose/runtime state was recovered."
+    fi
+    error "Apply failed because the container did not become running and rollback runtime recovery FAILED. Backup: $LAST_COMPOSE_BACKUP"
+  fi
+
+  if ! reconcile_running_image_patch "$CURRENT_IMAGE_ID"; then
+    error "Apply stopped because the recreated service image did not match the patch source and safe rebasing could not be completed. Stale-mount disablement was attempted."
   fi
 
   if [ "$STARTUP_WAIT_SECONDS" -gt 0 ]; then
