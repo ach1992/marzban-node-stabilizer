@@ -244,7 +244,7 @@ before="$(monotonic_ms)"
 env \
   CONTAINER_NAME="$CONTAINER_NAME" \
   STARTUP_WAIT_SECONDS=5 \
-  bash -c '. "$1" help >/dev/null; wait_for_xray_or_timeout >/dev/null' \
+  bash -c ". \"\$1\" help >/dev/null; wait_for_xray_or_timeout >/dev/null" \
     _ "$ROOT/bin/marzban-node-stabilizer"
 after="$(monotonic_ms)"
 [ $((after - before)) -lt 2000 ] || fail "dependency-free Xray observation did not exit promptly"
