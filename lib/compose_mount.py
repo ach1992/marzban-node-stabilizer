@@ -392,14 +392,22 @@ def _short_volume_items(lines: list[str], service_name: str) -> list[VolumeMount
 
 
 def _target_mounts(lines: list[str], service_name: str) -> list[VolumeMount]:
-    mounts = [
-        mount
-        for mount in _short_volume_items(lines, service_name)
-        if mount.target == TARGET
-    ]
-    if len(mounts) > 1:
+    exact: list[VolumeMount] = []
+
+    for mount in _short_volume_items(lines, service_name):
+        if mount.target == TARGET:
+            exact.append(mount)
+            continue
+
+        if mount.target == "/" or TARGET.startswith(mount.target + "/"):
+            raise ValueError(
+                f"Compose volume target {mount.target!r} is an ancestor of {TARGET!r}; "
+                "effective file ownership is ambiguous and cannot be rewritten safely"
+            )
+
+    if len(exact) > 1:
         raise ValueError("multiple exact rest_service.py mounts found for selected service")
-    return mounts
+    return exact
 
 
 def service_has_mount(text: str, service_name: str) -> bool:
