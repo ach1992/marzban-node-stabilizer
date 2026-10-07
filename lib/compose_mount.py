@@ -25,7 +25,19 @@ from typing import NamedTuple
 
 TARGET = "/code/rest_service.py"
 _MAPPING_ITEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*:(?:\s|$)")
+_SERVICE_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(.*)$")
+_SERVICE_BLOCK_RE = re.compile(r"^([A-Za-z0-9_.-]+)\s*:\s*$")
 _UNSUPPORTED_SCALAR_PREFIXES = ("{", "[", "&", "*", "!", "?", "|", ">")
+_SERVICE_KEYS_AFFECTING_MOUNT_OWNERSHIP = frozenset(
+    {
+        "extends",
+        "volumes_from",
+        "configs",
+        "secrets",
+        "tmpfs",
+        "devices",
+    }
+)
 
 
 class VolumeMount(NamedTuple):
@@ -112,12 +124,30 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
             break
 
     expected_service_indent = services_indent + 2
-    matches = [
-        idx
-        for idx in range(services_idx + 1, section_end)
-        if _indent(lines[idx]) == expected_service_indent
-        and lines[idx].strip() == f"{service_name}:"
-    ]
+    matches: list[int] = []
+    for idx in range(services_idx + 1, section_end):
+        line = lines[idx]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if _indent(line) != expected_service_indent:
+            continue
+
+        normalized = _strip_inline_comment(line.strip())
+        match = _SERVICE_BLOCK_RE.fullmatch(normalized)
+        if match is not None:
+            if match.group(1) == service_name:
+                matches.append(idx)
+            continue
+
+        # A selected service expressed as a quoted key, explicit YAML key,
+        # alias/anchor value, or inline/flow mapping is outside the narrow
+        # grammar. Treat it as unsafe rather than accidentally editing a
+        # different semantic service entry.
+        if service_name in normalized:
+            raise ValueError(
+                f"Compose service {service_name!r} uses unsupported key/value syntax"
+            )
+
     if len(matches) != 1:
         raise ValueError(
             f"expected exactly one Compose service {service_name!r}, found {len(matches)}"
@@ -135,9 +165,40 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
     return service_idx, service_end, service_indent
 
 
+def _validate_selected_service_definition(
+    lines: list[str], service_name: str
+) -> None:
+    service_idx, service_end, service_indent = _service_bounds(lines, service_name)
+    key_indent = service_indent + 2
+
+    for idx in range(service_idx + 1, service_end):
+        line = lines[idx]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _indent(line) != key_indent:
+            continue
+
+        normalized = _strip_inline_comment(stripped)
+        match = _SERVICE_KEY_RE.fullmatch(normalized)
+        if match is None:
+            raise ValueError(
+                "selected service uses unsupported YAML key/composition syntax; "
+                "refusing to infer effective volume ownership"
+            )
+
+        key = match.group(1)
+        if key in _SERVICE_KEYS_AFFECTING_MOUNT_OWNERSHIP:
+            raise ValueError(
+                f"selected service key {key!r} can affect effective mount ownership "
+                "and is unsupported by the narrow Compose editor"
+            )
+
+
 def _volumes_bounds(
     lines: list[str], service_name: str
 ) -> tuple[int, int, int] | None:
+    _validate_selected_service_definition(lines, service_name)
     service_idx, service_end, service_indent = _service_bounds(lines, service_name)
     key_indent = service_indent + 2
 
