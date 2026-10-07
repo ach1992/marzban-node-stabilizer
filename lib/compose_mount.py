@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Fail-closed editor for the Stabilizer's Compose bind mount.
 
-Only a service-level ``volumes:`` sequence using short syntax is mutated. Other
-service configuration that happens to mention /code/rest_service.py is ignored.
-Long-syntax mounts targeting the same path and ambiguous duplicate target mounts
-are rejected.
+This helper intentionally supports only a narrow, fully classified Compose
+subset: a block-style service volumes sequence containing single-line
+short-syntax scalar entries. Mapping/long syntax, aliases/anchors, flow
+collections, interpolation, multiline items, and other layouts the helper
+cannot prove safe are rejected before mutation.
+
+The safety goal is stronger than broad YAML compatibility: never create or
+remove an exact /code/rest_service.py target unless ownership can be determined
+unambiguously from the supported representation.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -18,6 +24,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 TARGET = "/code/rest_service.py"
+_MAPPING_ITEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*:(?:\s|$)")
+_UNSUPPORTED_SCALAR_PREFIXES = ("{", "[", "&", "*", "!", "?", "|", ">")
 
 
 class VolumeMount(NamedTuple):
@@ -29,6 +37,61 @@ class VolumeMount(NamedTuple):
 
 def _indent(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Strip a YAML inline comment while respecting simple quoted scalars."""
+
+    quote: str | None = None
+    escaped = False
+    i = 0
+    while i < len(value):
+        ch = value[i]
+
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                quote = None
+        elif quote == "'":
+            if ch == "'":
+                if i + 1 < len(value) and value[i + 1] == "'":
+                    i += 1
+                else:
+                    quote = None
+        else:
+            if ch in ("'", '"'):
+                quote = ch
+            elif ch == "#" and (i == 0 or value[i - 1].isspace()):
+                return value[:i].rstrip()
+
+        i += 1
+
+    if quote is not None:
+        raise ValueError("unterminated quoted scalar in Compose volumes section")
+    return value.rstrip()
+
+
+def _unquote_scalar(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return value
+
+    if value[0] in ("'", '"'):
+        if len(value) < 2 or value[-1] != value[0]:
+            raise ValueError("unsupported partially quoted Compose volume scalar")
+        inner = value[1:-1]
+        if value[0] == "'":
+            return inner.replace("''", "'")
+        if "\\" in inner:
+            raise ValueError("escaped double-quoted Compose volume scalars are unsupported")
+        return inner
+
+    if "'" in value or '"' in value:
+        raise ValueError("mixed/unbalanced quoting in Compose volume scalar is unsupported")
+    return value
 
 
 def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]:
@@ -77,17 +140,31 @@ def _volumes_bounds(
 ) -> tuple[int, int, int] | None:
     service_idx, service_end, service_indent = _service_bounds(lines, service_name)
     key_indent = service_indent + 2
-    matches = [
-        idx
-        for idx in range(service_idx + 1, service_end)
-        if _indent(lines[idx]) == key_indent and lines[idx].strip() == "volumes:"
-    ]
-    if len(matches) > 1:
+
+    candidates: list[int] = []
+    for idx in range(service_idx + 1, service_end):
+        line = lines[idx]
+        if _indent(line) != key_indent:
+            continue
+
+        stripped = line.strip()
+        if not re.match(r"^volumes\s*:", stripped):
+            continue
+
+        normalized = _strip_inline_comment(stripped)
+        if normalized != "volumes:":
+            raise ValueError(
+                "inline/flow/aliased service-level volumes are unsupported; "
+                "refusing partial Compose rewrite"
+            )
+        candidates.append(idx)
+
+    if len(candidates) > 1:
         raise ValueError("multiple service-level volumes: keys are unsupported")
-    if not matches:
+    if not candidates:
         return None
 
-    volumes_idx = matches[0]
+    volumes_idx = candidates[0]
     volumes_indent = key_indent
     volumes_end = service_end
     for idx in range(volumes_idx + 1, service_end):
@@ -98,55 +175,111 @@ def _volumes_bounds(
     return volumes_idx, volumes_end, volumes_indent
 
 
-def _unquote(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        return value[1:-1]
-    return value
+def _parse_short_mount_scalar(value: str, index: int) -> VolumeMount | None:
+    scalar = _unquote_scalar(value)
 
+    if not scalar:
+        raise ValueError("empty Compose volume item is unsupported")
+    if scalar.startswith(_UNSUPPORTED_SCALAR_PREFIXES):
+        raise ValueError(
+            "mapping/flow/anchor/alias/multiline Compose volume syntax is unsupported; "
+            "refusing partial rewrite"
+        )
+    if _MAPPING_ITEM_RE.match(scalar):
+        raise ValueError(
+            "mapping-style Compose volume syntax is unsupported; refusing partial rewrite"
+        )
+    if "$" in scalar:
+        raise ValueError(
+            "interpolated Compose volume syntax is unsupported for ownership-safe rewriting"
+        )
 
-def _parse_short_mount(line: str, item_indent: int, index: int) -> VolumeMount | None:
-    if _indent(line) != item_indent:
-        return None
-    stripped = line.strip()
-    if not stripped.startswith("- "):
-        return None
-    value = _unquote(stripped[2:].strip())
-    if not value or value.startswith(("type:", "source:", "target:")):
+    if ":" not in scalar:
+        if scalar == TARGET:
+            raise ValueError(
+                "anonymous exact rest_service.py target is unsupported; refusing rewrite"
+            )
         return None
 
-    parts = value.split(":")
-    if len(parts) < 2:
-        return None
-    source = parts[0]
-    target = parts[1]
-    options = ":".join(parts[2:]) if len(parts) > 2 else None
+    parts = scalar.rsplit(":", 2)
+    source: str
+    target: str
+    options: str | None
+
+    if len(parts) == 2:
+        source, target = parts
+        options = None
+    else:
+        left, middle, right = parts
+        if right.startswith("/"):
+            source = f"{left}:{middle}"
+            target = right
+            options = None
+        elif middle.startswith("/"):
+            source = left
+            target = middle
+            options = right
+        else:
+            raise ValueError(
+                "ambiguous short-syntax Compose volume target; refusing partial rewrite"
+            )
+
+    if not source:
+        raise ValueError("empty Compose volume source is unsupported")
+    if not target.startswith("/"):
+        raise ValueError(
+            "non-absolute Compose volume target is unsupported for this Linux deployment boundary"
+        )
+
     return VolumeMount(index=index, source=source, target=target, options=options)
 
 
-def _target_mounts(lines: list[str], service_name: str) -> list[VolumeMount]:
+def _short_volume_items(lines: list[str], service_name: str) -> list[VolumeMount]:
     bounds = _volumes_bounds(lines, service_name)
     if bounds is None:
         return []
+
     volumes_idx, volumes_end, volumes_indent = bounds
     item_indent = volumes_indent + 2
+    mounts: list[VolumeMount] = []
 
     for idx in range(volumes_idx + 1, volumes_end):
         line = lines[idx]
-        if _indent(line) <= item_indent:
-            continue
         stripped = line.strip()
-        if stripped.startswith("target:") and _unquote(stripped.split(":", 1)[1]) == TARGET:
+
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        indent = _indent(line)
+        if indent > item_indent:
             raise ValueError(
-                "existing rest_service.py mount uses unsupported long syntax; refusing partial rewrite"
+                "multiline/mapping Compose volume items are unsupported; "
+                "refusing partial rewrite"
+            )
+        if indent < item_indent:
+            raise ValueError(
+                "unexpected indentation inside service volumes; refusing partial rewrite"
             )
 
-    mounts: list[VolumeMount] = []
-    for idx in range(volumes_idx + 1, volumes_end):
-        mount = _parse_short_mount(lines[idx], item_indent, idx)
-        if mount is not None and mount.target == TARGET:
+        if not stripped.startswith("- "):
+            raise ValueError(
+                "service volumes must use single-line short-syntax sequence items"
+            )
+
+        raw_value = _strip_inline_comment(stripped[2:].strip())
+        mount = _parse_short_mount_scalar(raw_value, idx)
+        if mount is not None:
             mounts.append(mount)
 
+    return mounts
+
+
+def _target_mounts(lines: list[str], service_name: str) -> list[VolumeMount]:
+    mounts = [
+        mount
+        for mount in _short_volume_items(lines, service_name)
+        if mount.target == TARGET
+    ]
     if len(mounts) > 1:
         raise ValueError("multiple exact rest_service.py mounts found for selected service")
     return mounts
@@ -192,6 +325,7 @@ def _remove_empty_service_volumes(lines: list[str], service_name: str) -> list[s
 def remove_mount(text: str, service_name: str) -> str:
     lines = text.splitlines()
     _service_bounds(lines, service_name)
+    _short_volume_items(lines, service_name)
     lines = _remove_target_mount(lines, service_name)
     lines = _remove_empty_service_volumes(lines, service_name)
     return "\n".join(lines) + "\n"
@@ -200,18 +334,19 @@ def remove_mount(text: str, service_name: str) -> str:
 def add_mount(text: str, service_name: str, patch_file: str) -> str:
     if not patch_file.startswith("/"):
         raise ValueError("patch file path must be absolute")
-    if any(ch in patch_file for ch in ("\n", "\r", '"', "'", ":", "$")):
+    if any(ch in patch_file for ch in ("\n", "\r", '"', "'", ":", "$", "#")):
         raise ValueError("patch file path contains unsupported characters")
 
     lines = text.splitlines()
     _service_bounds(lines, service_name)
+    _short_volume_items(lines, service_name)
     mounts = _target_mounts(lines, service_name)
     if mounts and mounts[0].source == patch_file and mounts[0].options == "ro":
         return "\n".join(lines) + "\n"
     if mounts:
         lines = _remove_target_mount(lines, service_name)
 
-    service_idx, service_end, service_indent = _service_bounds(lines, service_name)
+    _, service_end, service_indent = _service_bounds(lines, service_name)
     bounds = _volumes_bounds(lines, service_name)
     mount_line = f'- "{patch_file}:{TARGET}:ro"'
 
@@ -221,7 +356,7 @@ def add_mount(text: str, service_name: str, patch_file: str) -> str:
         lines.insert(service_end, key_indent + "volumes:")
         lines.insert(service_end + 1, item_indent + mount_line)
     else:
-        volumes_idx, volumes_end, volumes_indent = bounds
+        _, volumes_end, volumes_indent = bounds
         item_indent = " " * (volumes_indent + 2)
         lines.insert(volumes_end, item_indent + mount_line)
 
