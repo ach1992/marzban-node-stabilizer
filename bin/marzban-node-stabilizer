@@ -207,6 +207,10 @@ compose_has_rest_service_mount() {
   grep -Fq "/code/rest_service.py" "$COMPOSE_FILE"
 }
 
+compose_mount_source() {
+  python3 "$COMPOSE_EDITOR_PATH" source --file "$COMPOSE_FILE" --service "$SERVICE_NAME"
+}
+
 add_bind_mount() {
   info "Ensuring rest_service.py bind mount exists in Compose..."
   python3 "$COMPOSE_EDITOR_PATH" add \
@@ -340,6 +344,27 @@ rollback_apply() {
   fi
 }
 
+disable_stale_stabilizer_mount_after_incompatibility() {
+  backup_compose
+  if ! remove_bind_mount; then
+    warn "Could not remove the stale stabilizer mount; Compose was left unchanged."
+    return 1
+  fi
+  if ! compose_validate; then
+    warn "Compose validation failed after removing the stale mount; restoring the previous Compose file."
+    restore_compose_backup
+    return 1
+  fi
+
+  warn "The stale stabilizer mount was removed because the current image source is incompatible with the reviewed transformer."
+  if ! compose_up force || ! wait_for_container; then
+    warn "The service did not recover on image-provided rest_service.py. The stale mount remains disabled; backup: $LAST_COMPOSE_BACKUP"
+    return 0
+  fi
+  warn "The service is running on image-provided rest_service.py with the stale stabilizer mount disabled."
+  return 0
+}
+
 wait_for_xray_or_timeout() {
   local waited=0
   while [ "$waited" -lt "$STARTUP_WAIT_SECONDS" ]; do
@@ -378,11 +403,18 @@ apply_patch() {
 
   local source_file="$ACTIVE_TMP_DIR/rest_service.image.py"
   local patched_file="$ACTIVE_TMP_DIR/rest_service.patched.py"
-  local source_sha patch_sha
+  local source_sha patch_sha existing_mount_source
   local previous_patch="$ACTIVE_TMP_DIR/previous.patch"
   local previous_original="$ACTIVE_TMP_DIR/previous.original"
   local previous_metadata="$ACTIVE_TMP_DIR/previous.metadata"
   local had_patch=0 had_original=0 had_metadata=0
+
+  if ! existing_mount_source="$(compose_mount_source)"; then
+    error "Could not safely inspect the existing rest_service.py mount for service $SERVICE_NAME."
+  fi
+  if [ -n "$existing_mount_source" ] && [ "$existing_mount_source" != "$PATCH_FILE" ]; then
+    error "Refusing to replace an existing rest_service.py mount not owned by this stabilizer: $existing_mount_source"
+  fi
 
   extract_image_rest_service "$source_file"
   cp -- "$source_file" "$patched_file"
@@ -391,10 +423,19 @@ apply_patch() {
   info "Image source SHA256: $source_sha"
 
   info "Applying reviewed node-side lifecycle patch..."
-  python3 "$PATCHER_PATH" \
+  if ! python3 "$PATCHER_PATH" \
     --file "$patched_file" \
     --timeout "$TIMEOUT_SECONDS" \
-    --grace "$RESTART_GRACE_SECONDS"
+    --grace "$RESTART_GRACE_SECONDS"; then
+    if [ -n "$existing_mount_source" ]; then
+      warn "Current image source is incompatible with the reviewed stabilizer patch."
+      if disable_stale_stabilizer_mount_after_incompatibility; then
+        error "Apply stopped: incompatible upstream source. The stale stabilizer mount was disabled; review compatibility before applying again."
+      fi
+      error "Apply stopped: incompatible upstream source, and the stale mount could not be disabled safely."
+    fi
+    error "Apply stopped: current image source is incompatible with the reviewed stabilizer patch. No stabilizer mount was active."
+  fi
   python3 -m py_compile "$patched_file"
   patch_sha="$(sha256sum "$patched_file" | awk '{print $1}')"
 

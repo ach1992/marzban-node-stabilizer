@@ -291,38 +291,49 @@ class PatchedRuntimeBehaviorTests(unittest.TestCase):
         self.assertEqual(self.service.core.restart_count, 1)
         self.assertTrue(self.service.core.started)
 
-    def test_effective_config_change_from_new_peer_is_not_deduplicated(self):
-        first_session = self.connect()
-        self.service.start(session_id=first_session, config='{"a": 1}')
+    def test_effective_config_change_from_peer_context_is_not_deduplicated(self):
+        session_id = self.connect()
+        self.service.start(session_id=session_id, config='{"a": 1}')
 
-        self.request.client.host = "192.0.2.11"
-        second_session = self.connect()
-        self.service.restart(session_id=second_session, config='{"a": 1}')
+        # The upstream XRayConfig transformation includes the controlling peer
+        # address. If that effective context changes, the same raw JSON is not
+        # equivalent and must not be coalesced.
+        self.service.client_ip = "192.0.2.11"
+        self.service.restart(session_id=session_id, config='{"a": 1}')
 
         self.assertEqual(self.service.core.restart_count, 1)
         self.assertTrue(self.service.core.started)
 
-    def test_new_connect_does_not_stop_running_core_and_stale_disconnect_is_rejected(self):
+    def test_new_connect_preserves_upstream_takeover_and_stale_disconnect_is_rejected(self):
         old_session = self.connect()
         self.service.start(session_id=old_session, config='{"a": 1}')
         self.assertTrue(self.service.core.started)
         initial_stop_count = self.service.core.stop_count
 
+        self.request.client.host = "192.0.2.11"
         new_session = self.connect()
         self.assertNotEqual(old_session, new_session)
+        self.assertFalse(self.service.core.started)
+        self.assertEqual(self.service.core.stop_count, initial_stop_count + 1)
+
+        with self.assertRaises(self.HTTPException) as ctx:
+            self.service.disconnect(session_id=old_session)
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertFalse(self.service.core.started)
+        self.assertEqual(self.service.core.stop_count, initial_stop_count + 1)
+
+        self.service.start(session_id=new_session, config='{"a": 1}')
         self.assertTrue(self.service.core.started)
-        self.assertEqual(self.service.core.stop_count, initial_stop_count)
 
         with self.assertRaises(self.HTTPException) as ctx:
             self.service.disconnect(session_id=old_session)
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertTrue(self.service.core.started)
-        self.assertEqual(self.service.core.stop_count, initial_stop_count)
+        self.assertEqual(self.service.core.stop_count, initial_stop_count + 1)
 
         self.service.disconnect(session_id=new_session)
         self.assertFalse(self.service.core.started)
-        self.assertEqual(self.service.core.stop_count, initial_stop_count + 1)
-
+        self.assertEqual(self.service.core.stop_count, initial_stop_count + 2)
 
 if __name__ == "__main__":
     unittest.main()

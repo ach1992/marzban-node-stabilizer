@@ -71,6 +71,30 @@ def service_has_mount(text: str, service_name: str) -> bool:
     return bool(_service_target_lines(lines, service_name))
 
 
+def mount_source(text: str, service_name: str) -> str | None:
+    lines = text.splitlines()
+    indexes = _service_target_lines(lines, service_name)
+    if not indexes:
+        return None
+    if len(indexes) != 1:
+        raise ValueError("multiple rest_service.py mounts found for selected service")
+
+    line = lines[indexes[0]].strip()
+    if not line.startswith("- "):
+        raise ValueError(
+            "existing rest_service.py mount uses unsupported long syntax; refusing partial rewrite"
+        )
+
+    value = line[2:].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        value = value[1:-1]
+
+    marker = f":{TARGET}"
+    if marker not in value:
+        raise ValueError("could not determine rest_service.py bind-mount source")
+    return value.split(marker, 1)[0]
+
+
 def _remove_target_lines(lines: list[str], service_name: str) -> list[str]:
     target_indexes = _service_target_lines(lines, service_name)
     for idx in target_indexes:
@@ -174,7 +198,7 @@ def atomic_write(path: Path, text: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("add", "remove", "has"))
+    parser.add_argument("action", choices=("add", "remove", "has", "source"))
     parser.add_argument("--file", required=True, type=Path)
     parser.add_argument("--service", required=True)
     parser.add_argument("--patch-file")
@@ -184,6 +208,11 @@ def main() -> int:
     try:
         if args.action == "has":
             return 0 if service_has_mount(original, args.service) else 1
+        if args.action == "source":
+            source = mount_source(original, args.service)
+            if source:
+                print(source)
+            return 0
         if args.action == "add":
             if not args.patch_file:
                 raise ValueError("--patch-file is required for add")

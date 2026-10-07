@@ -76,6 +76,27 @@ class ComposeMountTests(unittest.TestCase):
         self.assertFalse(compose_mount.service_has_mount(text, "marzban-node"))
         self.assertTrue(compose_mount.service_has_mount(text, "helper"))
 
+    def test_mount_source_returns_selected_service_source(self):
+        mounted = compose_mount.add_mount(
+            WITH_VOLUMES,
+            "marzban-node",
+            "/opt/marzban-node-patches/rest_service.py",
+        )
+        self.assertEqual(
+            compose_mount.mount_source(mounted, "marzban-node"),
+            "/opt/marzban-node-patches/rest_service.py",
+        )
+
+    def test_mount_source_rejects_multiple_target_mounts(self):
+        text = """services:
+  marzban-node:
+    volumes:
+      - /tmp/a.py:/code/rest_service.py:ro
+      - /tmp/b.py:/code/rest_service.py:ro
+"""
+        with self.assertRaisesRegex(ValueError, "multiple rest_service.py mounts"):
+            compose_mount.mount_source(text, "marzban-node")
+
     def test_unsafe_patch_path_is_rejected(self):
         for path in ("relative.py", "/tmp/a:b.py", "/tmp/$HOME.py", '/tmp/a"b.py'):
             with self.subTest(path=path):

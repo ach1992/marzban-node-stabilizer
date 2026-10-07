@@ -115,6 +115,13 @@ def patch_source(source: str, timeout: int, grace: int) -> str:
             if self.connected:
                 logger.warning(
                     f'New connection from {client_ip}, Core control access was taken away from previous client.')
+                if self.core.started:
+                    try:
+                        self.core.stop()
+                    except RuntimeError:
+                        pass
+                self.last_start_ts = 0.0
+                self.last_config_hash = None
 
             self.session_id = uuid4()
             self.client_ip = client_ip
