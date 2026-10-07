@@ -85,4 +85,93 @@ if (
 fi
 
 wait "$holder_pid"
+
+# Stabilizer mount ownership requires path + marker + metadata/hash identity.
+PATCH_DIR="$TMP/patches"
+PATCH_FILE="$PATCH_DIR/rest_service.py"
+METADATA_FILE="$PATCH_DIR/metadata.env"
+mkdir -p "$PATCH_DIR"
+printf '# marzban-node-stabilizer: lifecycle-hardening-v2\npass\n' > "$PATCH_FILE"
+PATCH_SHA="$(sha256sum "$PATCH_FILE" | awk '{print $1}')"
+cat > "$METADATA_FILE" <<EOF_METADATA
+PATCH_FORMAT_VERSION=2
+PATCH_SHA256=$PATCH_SHA
+EOF_METADATA
+verify_stabilizer_mount_identity "$PATCH_FILE" || fail "valid Stabilizer mount ownership was not recognized"
+printf 'PATCH_FORMAT_VERSION=2\nPATCH_SHA256=deadbeef\n' > "$METADATA_FILE"
+if verify_stabilizer_mount_identity "$PATCH_FILE"; then
+  fail "invalid Stabilizer metadata/hash was accepted as ownership proof"
+fi
+
+# restore must refuse a foreign target mount before mutating Compose.
+FOREIGN_COMPOSE="$TMP/foreign-compose.yml"
+printf 'services:\n  marzban-node:\n    image: example\n' > "$FOREIGN_COMPOSE"
+FOREIGN_BEFORE="$(sha256sum "$FOREIGN_COMPOSE" | awk '{print $1}')"
+if (
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  require_root() { :; }
+  check_os() { :; }
+  normalize_settings() { :; }
+  check_requirements() { :; }
+  check_compose_editor() { :; }
+  acquire_lock() { :; }
+  COMPOSE_FILE="$FOREIGN_COMPOSE"
+  SERVICE_NAME=marzban-node
+  PATCH_FILE="$TMP/owned-rest-service.py"
+  compose_mount_source() { printf '%s\n' "$TMP/foreign-rest-service.py"; }
+  restore_patch
+) >"$TMP/foreign-restore.log" 2>&1; then
+  fail "restore unexpectedly accepted a foreign target mount"
+fi
+FOREIGN_AFTER="$(sha256sum "$FOREIGN_COMPOSE" | awk '{print $1}')"
+[ "$FOREIGN_BEFORE" = "$FOREIGN_AFTER" ] || fail "foreign restore refusal mutated Compose"
+grep -Fq 'foreign mount source' "$TMP/foreign-restore.log" || fail "foreign restore refusal was not explicit"
+
+# A rollback recreate failure must be observable, never swallowed.
+if (
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  LAST_COMPOSE_BACKUP="$TMP/recovery-backup.yml"
+  compose_validate() { return 0; }
+  compose_up() { return 1; }
+  wait_for_container() { return 0; }
+  recover_service_after_compose_restore
+) >"$TMP/recovery-failure.log" 2>&1; then
+  fail "rollback recovery unexpectedly succeeded when service recreate failed"
+fi
+grep -Fq 'Rollback recovery failed: service recreate failed' "$TMP/recovery-failure.log" \
+  || fail "rollback recreate failure was not reported explicitly"
+
+# Simulate restore primary recreate failure followed by rollback recreate failure.
+RESTORE_COMPOSE="$TMP/restore-compose.yml"
+printf 'services:\n  marzban-node:\n    image: previous\n    volumes:\n      - /tmp/owned.py:/code/rest_service.py:ro\n' > "$RESTORE_COMPOSE"
+RESTORE_ORIGINAL="$(cat "$RESTORE_COMPOSE")"
+if (
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  require_root() { :; }
+  check_os() { :; }
+  normalize_settings() { :; }
+  check_requirements() { :; }
+  check_compose_editor() { :; }
+  acquire_lock() { :; }
+  COMPOSE_FILE="$RESTORE_COMPOSE"
+  SERVICE_NAME=marzban-node
+  PATCH_FILE=/tmp/owned.py
+  compose_mount_source() { printf '%s\n' "$PATCH_FILE"; }
+  verify_stabilizer_mount_identity() { return 0; }
+  remove_bind_mount() { printf 'services:\n  marzban-node:\n    image: restored\n' > "$COMPOSE_FILE"; }
+  compose_validate() { return 0; }
+  compose_up() { return 1; }
+  wait_for_container() { return 0; }
+  restore_patch
+) >"$TMP/restore-rollback-failure.log" 2>&1; then
+  fail "restore unexpectedly succeeded when primary and rollback recreates failed"
+fi
+[ "$(cat "$RESTORE_COMPOSE")" = "$RESTORE_ORIGINAL" ] \
+  || fail "restore rollback failure did not put the previous Compose file back on disk"
+grep -Fq 'rollback runtime recovery FAILED' "$TMP/restore-rollback-failure.log" \
+  || fail "restore did not surface rollback runtime recovery failure"
+
 echo "shell logic tests: OK"
