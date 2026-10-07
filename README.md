@@ -24,7 +24,7 @@ The patch is designed to:
 - never silently drop a materially different requested Xray config;
 - use monotonic time for grace-period calculations;
 - serialize lifecycle transitions and reject stale-session disconnects;
-- avoid stopping a running Xray core merely because a newer control session connects;
+- preserve upstream session-takeover behavior while preventing an older session from tearing down the newer one;
 - fail closed if the upstream methods being replaced have changed unexpectedly;
 - record the source/image identity used to build the active patch;
 - validate Docker Compose before service recreation;
@@ -151,7 +151,7 @@ Custom paths change the corresponding entries.
 
 The source transformer deliberately refuses to replace lifecycle methods whose reviewed upstream shape has changed. This is intentional: an upstream change must be reviewed before this project overwrites it.
 
-If `apply` reports upstream drift/incompatibility, do not bypass the check by forcing an old patched file onto the new image. Review the new upstream source and update the transformer/tests instead.
+If `apply` finds that the current image changed incompatibly while the Stabilizer mount is active, it disables that stale mount so the old host copy cannot mask the new image source. Review the new upstream source and update the transformer/tests before applying the Stabilizer again.
 
 ## Development and project scope
 
