@@ -423,6 +423,43 @@ services:
             "/tmp/source:with-colon",
         )
 
+    def test_noncanonical_container_targets_are_rejected_before_mutation(self):
+        cases = {
+            "dot_segment": "/code/./rest_service.py",
+            "parent_segment": "/code/sub/../rest_service.py",
+            "redundant_separator": "/code//rest_service.py",
+            "leading_redundant_separator": "//code/rest_service.py",
+            "trailing_separator": "/code/rest_service.py/",
+        }
+        for name, target in cases.items():
+            text = f"""services:
+  marzban-node:
+    volumes:
+      - /tmp/foreign.py:{target}:ro
+"""
+            with self.subTest(target_form=name):
+                self.assert_layout_rejected_everywhere(text)
+
+    def test_canonical_equivalent_duplicate_targets_fail_closed(self):
+        text = """services:
+  marzban-node:
+    volumes:
+      - /tmp/foreign.py:/code/./rest_service.py:ro
+      - /tmp/second.py:/code/rest_service.py:ro
+"""
+        self.assert_layout_rejected_everywhere(text)
+
+    def test_other_canonical_absolute_targets_remain_supported(self):
+        text = """services:
+  marzban-node:
+    volumes:
+      - /tmp/data:/var/lib/marzban-node:ro
+"""
+        self.assertFalse(compose_mount.service_has_mount(text, "marzban-node"))
+        mounted = compose_mount.add_mount(text, "marzban-node", "/opt/mns/rest_service.py")
+        self.assertIn("/tmp/data:/var/lib/marzban-node:ro", mounted)
+        self.assertIn("/opt/mns/rest_service.py:/code/rest_service.py:ro", mounted)
+
     def test_unsafe_patch_path_is_rejected(self):
         for path in (
             "relative.py",
