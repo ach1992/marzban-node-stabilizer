@@ -4,13 +4,25 @@ A small Debian/Ubuntu helper that applies a conservative, recoverable node-side 
 
 The project is intentionally limited to the Marzban Node host. It does **not** modify the Marzban Panel.
 
-## Install and apply automatically
+## Install the stable release
+
+The recommended production-facing install path is the latest tagged release. For `v0.2.0`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env REF=v0.2.0 bash
 ```
 
-The installer first resolves the requested GitHub ref to one immutable commit SHA, then downloads the CLI and its two Python helpers from that exact snapshot. It validates their syntax, installs them under `/usr/local/`, and runs `apply` unless `AUTO_APPLY=0` is set.
+Both the installer URL and `REF` are pinned to the same release. The installer then resolves `REF` once to an immutable commit SHA and downloads the CLI and both Python helpers from that exact snapshot. It validates their syntax, installs them under `/usr/local/`, and runs `apply` unless `AUTO_APPLY=0` is set.
+
+### Install the latest development state
+
+Use `main` only when you intentionally want the newest integrated repository state instead of a tagged release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main bash
+```
+
+For normal installs and repeatable recovery, prefer a tagged release.
 
 ## What `apply` does
 
@@ -64,7 +76,8 @@ COMPOSE_FILE=/opt/marzban-node/docker-compose.yml
 If paths or service names differ:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env \
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env \
+  REF=v0.2.0 \
   COMPOSE_FILE=/opt/marzban-node/docker-compose.yml \
   CONTAINER_NAME=marzban-node \
   SERVICE_NAME=marzban-node \
@@ -74,7 +87,8 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/mai
 Runtime tuning:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env \
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env \
+  REF=v0.2.0 \
   TIMEOUT_SECONDS=7 \
   RESTART_GRACE_SECONDS=60 \
   bash
@@ -87,7 +101,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/mai
 ## Install only without applying
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env AUTO_APPLY=0 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env REF=v0.2.0 AUTO_APPLY=0 bash
 ```
 
 Then apply manually:
@@ -95,6 +109,12 @@ Then apply manually:
 ```bash
 sudo marzban-node-stabilizer apply
 ```
+
+## Upgrade or reinstall
+
+Re-running the installer for a chosen release replaces the installed CLI/helpers from one immutable release snapshot and runs `apply` again by default. `apply` is designed to be repeatable: it rebuilds the patch from the currently running service image source rather than reusing an old patched host copy.
+
+To move to a newer release, change both the installer tag and `REF` to that release. To install files without applying immediately, add `AUTO_APPLY=0`.
 
 ## Status
 
