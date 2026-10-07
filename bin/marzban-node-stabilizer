@@ -199,9 +199,15 @@ restore_compose_backup() {
 }
 
 compose_has_rest_service_mount() {
+  local rc=0
+
   if [ -f "$COMPOSE_EDITOR_PATH" ]; then
-    python3 "$COMPOSE_EDITOR_PATH" has --file "$COMPOSE_FILE" --service "$SERVICE_NAME"
-    return
+    if python3 "$COMPOSE_EDITOR_PATH" has --file "$COMPOSE_FILE" --service "$SERVICE_NAME"; then
+      return 0
+    fi
+    rc=$?
+    [ "$rc" -eq 1 ] && return 1
+    return "$rc"
   fi
 
   # Compatibility fallback for an older partial installation where the helper
@@ -260,6 +266,35 @@ ensure_container_exists() {
 
 container_image_id() {
   docker container inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+container_env_value() {
+  local key="$1"
+  docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null \
+    | awk -F= -v wanted="$key" '
+        $1 == wanted {
+          sub(/^[^=]*=/, "")
+          value=$0
+        }
+        END {
+          if (value != "") print value
+        }
+      '
+}
+
+effective_container_port() {
+  local key="$1"
+  local default_port="$2"
+  local port
+
+  port="$(container_env_value "$key" || true)"
+  [ -n "$port" ] || port="$default_port"
+
+  if ! is_uint "$port" || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    warn "Invalid effective $key value: $port"
+    return 1
+  fi
+  printf '%s\n' "$port"
 }
 
 extract_rest_service_from_image() {
@@ -663,10 +698,16 @@ show_status_core() {
 
   echo
   echo "[INFO] Compose mount state:"
+  local mount_rc=0
   if compose_has_rest_service_mount; then
     grep -F "/code/rest_service.py" "$COMPOSE_FILE" || true
   else
-    echo "No rest_service.py bind mount found."
+    mount_rc=$?
+    if [ "$mount_rc" -eq 1 ]; then
+      echo "No rest_service.py bind mount found."
+    else
+      echo "Mount state unknown: Compose volume syntax is unsupported or could not be inspected safely."
+    fi
   fi
 
   echo
@@ -686,13 +727,21 @@ show_status_core() {
   fi
 
   if container_is_running; then
+    local service_port api_port
+    service_port="$(effective_container_port SERVICE_PORT 62050 || true)"
+    api_port="$(effective_container_port XRAY_API_PORT 62051 || true)"
+
     echo
     echo "[INFO] Xray process inside container:"
     docker exec "$CONTAINER_NAME" sh -c 'pgrep -a xray || true' || true
 
     echo
     echo "[INFO] Listening ports inside container:"
-    docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray|62050|62051' || true" || true
+    if [ -n "$service_port" ] && [ -n "$api_port" ]; then
+      docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray|:${service_port}([[:space:]]|$)|:${api_port}([[:space:]]|$)' || true" || true
+    else
+      docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray' || true" || true
+    fi
   fi
 
   echo
@@ -725,12 +774,19 @@ diagnose_runtime_health() {
     return 0
   fi
 
+  local api_port
+  api_port="$(effective_container_port XRAY_API_PORT 62051 || true)"
+  if [ -z "$api_port" ]; then
+    echo "readiness-unknown: Xray is running but the effective XRAY_API_PORT is invalid"
+    return 0
+  fi
+
   if docker exec "$CONTAINER_NAME" sh -c 'command -v ss >/dev/null 2>&1' >/dev/null 2>&1; then
-    if docker exec "$CONTAINER_NAME" sh -c "ss -lnt 2>/dev/null | grep -Eq '[:.]62051([[:space:]]|$)'" >/dev/null 2>&1; then
-      echo "basic-ready: Xray is running and the default API listener (62051) is present"
+    if docker exec "$CONTAINER_NAME" sh -c "ss -lnt 2>/dev/null | grep -Eq ':${api_port}([[:space:]]|$)'" >/dev/null 2>&1; then
+      echo "basic-ready: Xray is running and the effective API listener ($api_port) is present"
       echo "note: this does not prove end-to-end Panel reachability"
     else
-      echo "xray-api-unready: Xray is running but the default API listener (62051) was not detected"
+      echo "xray-api-unready: Xray is running but the effective API listener ($api_port) was not detected"
     fi
   else
     echo "readiness-unknown: Xray is running but 'ss' is unavailable inside the container"
