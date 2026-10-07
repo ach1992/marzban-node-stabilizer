@@ -159,6 +159,37 @@ class ComposeMountTests(unittest.TestCase):
             with self.subTest(layout=name):
                 self.assert_layout_rejected_everywhere(text)
 
+    def test_root_service_composition_and_semantic_services_forms_are_rejected(self):
+        cases = {
+            "top_level_include": """include:
+  - ./other-compose.yml
+services:
+  marzban-node:
+    image: example/node
+""",
+            "services_alias": """x-services: &all_services
+  marzban-node:
+    image: example/node
+services: *all_services
+""",
+            "services_flow": """services: {marzban-node: {image: example/node}}
+""",
+            "quoted_services_key": """"services":
+  marzban-node:
+    image: example/node
+""",
+            "semantic_duplicate_services": """services:
+  marzban-node:
+    image: example/node
+"services":
+  helper:
+    image: example/helper
+""",
+        }
+        for name, text in cases.items():
+            with self.subTest(layout=name):
+                self.assert_layout_rejected_everywhere(text)
+
     def test_effective_volume_composition_is_rejected_before_mutation(self):
         cases = {
             "yaml_merge": """x-node-base: &node_base
