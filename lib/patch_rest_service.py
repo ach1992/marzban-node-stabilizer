@@ -336,6 +336,7 @@ def _mns_wait_for_core_start(logs, core_version, service, generation, session_id
 
                     self.lifecycle_generation += 1
                     operation_generation = self.lifecycle_generation
+                    logs.clear()
                     self.core.start(xray_config)
                     self.last_start_ts = time.monotonic()
                     self.last_config_hash = config_hash
@@ -423,6 +424,7 @@ def _mns_wait_for_core_start(logs, core_version, service, generation, session_id
 
                     self.lifecycle_generation += 1
                     operation_generation = self.lifecycle_generation
+                    logs.clear()
                     self.core.restart(xray_config)
                     self.last_start_ts = time.monotonic()
                     self.last_config_hash = config_hash
