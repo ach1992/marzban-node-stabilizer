@@ -121,6 +121,12 @@ sudo rm -f /usr/local/sbin/marzban-node-stabilizer
 /opt/marzban-node/docker-compose.yml.bak.YYYYMMDD-HHMMSS
 ```
 
+## Development and project scope
+
+The durable project scope, compatibility boundary, engineering invariants, validation expectations, and maintenance workflow are documented in [`docs/PROJECT-SPEC.md`](docs/PROJECT-SPEC.md).
+
+Active implementation work should be tracked in GitHub Issues rather than duplicated in documentation.
+
 ## Notes
 
 This is an unofficial patch helper. Use it only if you understand that it modifies the runtime behavior of Marzban Node.
