@@ -10,7 +10,7 @@ The project is intentionally limited to the Marzban Node host. It does **not** m
 curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo bash
 ```
 
-The installer downloads the CLI and its two small Python helpers, validates their syntax, installs them under `/usr/local/`, and runs `apply` unless `AUTO_APPLY=0` is set.
+The installer first resolves the requested GitHub ref to one immutable commit SHA, then downloads the CLI and its two Python helpers from that exact snapshot. It validates their syntax, installs them under `/usr/local/`, and runs `apply` unless `AUTO_APPLY=0` is set.
 
 ## What `apply` does
 
@@ -34,6 +34,8 @@ The patch is designed to:
 - recreate only the configured Marzban Node Compose service.
 
 The patched file is persisted with a Docker Compose bind mount so normal container recreation keeps the stabilization active.
+
+For safety, the Compose editor deliberately supports only a narrow representation it can classify without ambiguity: a block-style service `volumes:` list made of single-line short-syntax entries. Mapping/long syntax, flow/alias/anchor layouts, interpolation, anonymous exact `/code/rest_service.py` targets, and other ambiguous forms are refused before mutation rather than partially rewritten.
 
 ## Supported OS
 
@@ -100,7 +102,7 @@ sudo marzban-node-stabilizer apply
 sudo marzban-node-stabilizer status
 ```
 
-Shows container state, bind-mount state, patch metadata, Xray process/listeners when available, and recent logs.
+Shows container state, bind-mount state, patch metadata, Xray process/listeners when available, and recent logs. Listener diagnostics read the effective `SERVICE_PORT` and `XRAY_API_PORT` from the running container environment, falling back to Marzban Node defaults only when those variables are unset.
 
 ## Diagnose intermittent failures
 
