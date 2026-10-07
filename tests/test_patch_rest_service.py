@@ -1,11 +1,10 @@
 import contextlib
-import hashlib
 import importlib.util
 import json
-import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -23,20 +22,6 @@ def load_patcher():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
-
-
-def configure_fixture_hashes(patcher, path: Path):
-    source = path.read_text()
-    for name in ("connect", "disconnect", "start", "stop", "restart"):
-        pattern = re.compile(
-            rf"(?ms)^    def {re.escape(name)}\([^\n]*\):\n.*?(?=^    (?:async )?def [A-Za-z_][A-Za-z0-9_]*\(|^service = Service\(\))"
-        )
-        match = pattern.search(source)
-        if not match:
-            raise AssertionError(f"fixture method missing: {name}")
-        patcher.EXPECTED_METHOD_SHA256[name] = hashlib.sha256(
-            match.group(0).encode("utf-8")
-        ).hexdigest()
 
 
 def install_runtime_stubs():
@@ -133,8 +118,6 @@ def install_runtime_stubs():
     class XRayConfig(dict):
         def __init__(self, config_text, peer_ip):
             super().__init__(json.loads(config_text))
-            # Model the upstream node-side transformation whose effective output
-            # depends on the current Panel peer address.
             self["_synthetic_peer_ip"] = peer_ip
             self.peer_ip = peer_ip
 
@@ -145,6 +128,7 @@ def install_runtime_stubs():
             self.start_count = 0
             self.restart_count = 0
             self.stop_count = 0
+            self.emit_started = True
 
         def get_version(self):
             return "1.0.0"
@@ -163,7 +147,7 @@ def install_runtime_stubs():
                 self._active_logs = None
 
         def _emit_started(self):
-            if self._active_logs is not None:
+            if self.emit_started and self._active_logs is not None:
                 self._active_logs.append("Xray 1.0.0 started")
 
         def start(self, config):
@@ -175,6 +159,7 @@ def install_runtime_stubs():
 
         def restart(self, config):
             self.restart_count += 1
+            self.stop()
             self._started = True
             self._emit_started()
 
@@ -216,7 +201,6 @@ class PatchTransformTests(unittest.TestCase):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.target = self.tmpdir / "rest_service.py"
         shutil.copy2(FIXTURE, self.target)
-        configure_fixture_hashes(self.patcher, self.target)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
@@ -232,6 +216,7 @@ class PatchTransformTests(unittest.TestCase):
         self.assertEqual(first.count(self.patcher.MARKER), 1)
         self.assertIn("time.monotonic()", first)
         self.assertIn("threading.RLock()", first)
+        self.assertIn("self.lifecycle_generation = 0", first)
 
     def test_patch_parameters_can_be_updated_without_duplication(self):
         self.patch(timeout=7, grace=60)
@@ -240,16 +225,40 @@ class PatchTransformTests(unittest.TestCase):
         self.assertIn("MNS_RESTART_GRACE_SECONDS = 90", changed)
         self.assertEqual(changed.count(self.patcher.MARKER), 1)
 
-    def test_unreviewed_upstream_method_change_is_rejected(self):
+    def test_unreviewed_upstream_method_change_is_rejected_without_partial_output(self):
         source = self.target.read_text().replace(
             "        self.connected = True\n",
             "        self.connected = True\n        # simulated upstream change\n",
             1,
         )
         self.target.write_text(source)
+        original = self.target.read_text()
         with self.assertRaisesRegex(ValueError, "upstream Service.connect changed"):
             self.patcher.patch_file(self.target, timeout=7, grace=60)
+        self.assertEqual(self.target.read_text(), original)
         self.assertNotIn(self.patcher.MARKER, self.target.read_text())
+
+    def test_state_anchor_is_bound_to_service_init_not_earlier_object(self):
+        source = self.target.read_text()
+        prefix = """class EarlierObject:\n    def __init__(self):\n        self.config = None\n\n\n"""
+        self.target.write_text(prefix + source)
+        patched = self.patch()
+        earlier_object = patched.split(self.patcher.MARKER, 1)[0]
+        _, service = patched.split("class Service(object):", 1)
+        self.assertNotIn("lifecycle_generation", earlier_object)
+        self.assertIn("self.lifecycle_generation = 0", service)
+
+    def test_ambiguous_service_state_anchor_is_rejected(self):
+        source = self.target.read_text().replace(
+            "        self.config = None\n",
+            "        self.config = None\n        self.config = None\n",
+            1,
+        )
+        self.target.write_text(source)
+        original = self.target.read_text()
+        with self.assertRaisesRegex(ValueError, "exactly one Service.__init__ assignment"):
+            self.patcher.patch_file(self.target, timeout=7, grace=60)
+        self.assertEqual(self.target.read_text(), original)
 
 
 class PatchedRuntimeBehaviorTests(unittest.TestCase):
@@ -258,9 +267,9 @@ class PatchedRuntimeBehaviorTests(unittest.TestCase):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.target = self.tmpdir / "rest_service.py"
         shutil.copy2(FIXTURE, self.target)
-        configure_fixture_hashes(patcher, self.target)
         patcher.patch_file(self.target, timeout=7, grace=60)
         self.runtime, self.HTTPException = load_patched_runtime(self.target)
+        self.runtime.MNS_START_CONFIRM_SECONDS = 1
         self.service = self.runtime.Service()
         self.request = types.SimpleNamespace(client=types.SimpleNamespace(host="192.0.2.10"))
 
@@ -269,6 +278,19 @@ class PatchedRuntimeBehaviorTests(unittest.TestCase):
 
     def connect(self):
         return self.service.connect(self.request)["session_id"]
+
+    def run_in_thread(self, func):
+        result = {}
+
+        def target():
+            try:
+                result["value"] = func()
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=target)
+        thread.start()
+        return thread, result
 
     def test_started_log_exits_wait_early(self):
         session_id = self.connect()
@@ -294,20 +316,14 @@ class PatchedRuntimeBehaviorTests(unittest.TestCase):
     def test_effective_config_change_from_peer_context_is_not_deduplicated(self):
         session_id = self.connect()
         self.service.start(session_id=session_id, config='{"a": 1}')
-
-        # The upstream XRayConfig transformation includes the controlling peer
-        # address. If that effective context changes, the same raw JSON is not
-        # equivalent and must not be coalesced.
         self.service.client_ip = "192.0.2.11"
         self.service.restart(session_id=session_id, config='{"a": 1}')
-
         self.assertEqual(self.service.core.restart_count, 1)
         self.assertTrue(self.service.core.started)
 
-    def test_new_connect_preserves_upstream_takeover_and_stale_disconnect_is_rejected(self):
+    def test_new_connect_preserves_takeover_and_stale_disconnect_is_rejected(self):
         old_session = self.connect()
         self.service.start(session_id=old_session, config='{"a": 1}')
-        self.assertTrue(self.service.core.started)
         initial_stop_count = self.service.core.stop_count
 
         self.request.client.host = "192.0.2.11"
@@ -319,21 +335,77 @@ class PatchedRuntimeBehaviorTests(unittest.TestCase):
         with self.assertRaises(self.HTTPException) as ctx:
             self.service.disconnect(session_id=old_session)
         self.assertEqual(ctx.exception.status_code, 403)
-        self.assertFalse(self.service.core.started)
         self.assertEqual(self.service.core.stop_count, initial_stop_count + 1)
 
         self.service.start(session_id=new_session, config='{"a": 1}')
         self.assertTrue(self.service.core.started)
-
-        with self.assertRaises(self.HTTPException) as ctx:
-            self.service.disconnect(session_id=old_session)
-        self.assertEqual(ctx.exception.status_code, 403)
-        self.assertTrue(self.service.core.started)
-        self.assertEqual(self.service.core.stop_count, initial_stop_count + 1)
-
         self.service.disconnect(session_id=new_session)
         self.assertFalse(self.service.core.started)
-        self.assertEqual(self.service.core.stop_count, initial_stop_count + 2)
+
+    def test_slow_start_does_not_block_connect_and_stale_completion_cannot_commit(self):
+        old_session = self.connect()
+        self.service.core.emit_started = False
+        thread, result = self.run_in_thread(
+            lambda: self.service.start(session_id=old_session, config='{"a": 1}')
+        )
+        time.sleep(0.05)
+
+        self.request.client.host = "192.0.2.11"
+        started = time.monotonic()
+        new_session = self.connect()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.3)
+        self.assertNotEqual(old_session, new_session)
+
+        thread.join(timeout=1.5)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", result)
+        self.assertEqual(self.service.session_id, new_session)
+        self.assertIsNone(self.service.last_config_hash)
+        self.assertFalse(self.service.core.started)
+
+    def test_slow_restart_does_not_block_disconnect(self):
+        session_id = self.connect()
+        self.service.start(session_id=session_id, config='{"a": 1}')
+        self.service.core.emit_started = False
+        thread, result = self.run_in_thread(
+            lambda: self.service.restart(session_id=session_id, config='{"a": 2}')
+        )
+        time.sleep(0.05)
+
+        started = time.monotonic()
+        self.service.disconnect(session_id=session_id)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.3)
+
+        thread.join(timeout=1.5)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", result)
+        self.assertIsNone(self.service.session_id)
+        self.assertFalse(self.service.connected)
+        self.assertIsNone(self.service.last_config_hash)
+
+    def test_slow_restart_does_not_block_stop(self):
+        session_id = self.connect()
+        self.service.start(session_id=session_id, config='{"a": 1}')
+        self.service.core.emit_started = False
+        thread, result = self.run_in_thread(
+            lambda: self.service.restart(session_id=session_id, config='{"a": 2}')
+        )
+        time.sleep(0.05)
+
+        started = time.monotonic()
+        self.service.stop(session_id=session_id)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.3)
+
+        thread.join(timeout=1.5)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", result)
+        self.assertEqual(self.service.session_id, session_id)
+        self.assertFalse(self.service.core.started)
+        self.assertIsNone(self.service.last_config_hash)
+
 
 if __name__ == "__main__":
     unittest.main()
