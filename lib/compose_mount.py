@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Minimal fail-closed editor for the stabilizer's Compose bind mount.
+"""Fail-closed editor for the Stabilizer's Compose bind mount.
 
-This intentionally supports the common short-syntax volumes form without adding a
-YAML dependency. Unsupported existing long-syntax mounts targeting
-/code/rest_service.py are rejected instead of being partially rewritten.
+Only a service-level ``volumes:`` sequence using short syntax is mutated. Other
+service configuration that happens to mention /code/rest_service.py is ignored.
+Long-syntax mounts targeting the same path and ambiguous duplicate target mounts
+are rejected.
 """
 
 from __future__ import annotations
@@ -14,8 +15,16 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 TARGET = "/code/rest_service.py"
+
+
+class VolumeMount(NamedTuple):
+    index: int
+    source: str
+    target: str
+    options: str | None
 
 
 def _indent(line: str) -> int:
@@ -23,15 +32,14 @@ def _indent(line: str) -> int:
 
 
 def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]:
-    services_idx = None
-    services_indent = None
-    for idx, line in enumerate(lines):
-        if line.strip() == "services:":
-            services_idx = idx
-            services_indent = _indent(line)
-            break
-    if services_idx is None:
-        raise ValueError("Compose file has no services: section")
+    services = [
+        (idx, _indent(line))
+        for idx, line in enumerate(lines)
+        if line.strip() == "services:"
+    ]
+    if len(services) != 1:
+        raise ValueError(f"expected exactly one services: section, found {len(services)}")
+    services_idx, services_indent = services[0]
 
     section_end = len(lines)
     for idx in range(services_idx + 1, len(lines)):
@@ -40,16 +48,19 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
             section_end = idx
             break
 
-    service_idx = None
-    service_indent = None
-    for idx in range(services_idx + 1, section_end):
-        line = lines[idx]
-        if line.strip() == f"{service_name}:":
-            service_idx = idx
-            service_indent = _indent(line)
-            break
-    if service_idx is None:
-        raise ValueError(f"Compose service not found: {service_name}")
+    expected_service_indent = services_indent + 2
+    matches = [
+        idx
+        for idx in range(services_idx + 1, section_end)
+        if _indent(lines[idx]) == expected_service_indent
+        and lines[idx].strip() == f"{service_name}:"
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected exactly one Compose service {service_name!r}, found {len(matches)}"
+        )
+    service_idx = matches[0]
+    service_indent = expected_service_indent
 
     service_end = section_end
     for idx in range(service_idx + 1, section_end):
@@ -61,81 +72,127 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
     return service_idx, service_end, service_indent
 
 
-def _service_target_lines(lines: list[str], service_name: str) -> list[int]:
-    service_idx, service_end, _ = _service_bounds(lines, service_name)
-    return [idx for idx in range(service_idx + 1, service_end) if TARGET in lines[idx]]
-
-
-def service_has_mount(text: str, service_name: str) -> bool:
-    lines = text.splitlines()
-    return bool(_service_target_lines(lines, service_name))
-
-
-def mount_source(text: str, service_name: str) -> str | None:
-    lines = text.splitlines()
-    indexes = _service_target_lines(lines, service_name)
-    if not indexes:
+def _volumes_bounds(
+    lines: list[str], service_name: str
+) -> tuple[int, int, int] | None:
+    service_idx, service_end, service_indent = _service_bounds(lines, service_name)
+    key_indent = service_indent + 2
+    matches = [
+        idx
+        for idx in range(service_idx + 1, service_end)
+        if _indent(lines[idx]) == key_indent and lines[idx].strip() == "volumes:"
+    ]
+    if len(matches) > 1:
+        raise ValueError("multiple service-level volumes: keys are unsupported")
+    if not matches:
         return None
-    if len(indexes) != 1:
-        raise ValueError("multiple rest_service.py mounts found for selected service")
 
-    line = lines[indexes[0]].strip()
-    if not line.startswith("- "):
-        raise ValueError(
-            "existing rest_service.py mount uses unsupported long syntax; refusing partial rewrite"
-        )
+    volumes_idx = matches[0]
+    volumes_indent = key_indent
+    volumes_end = service_end
+    for idx in range(volumes_idx + 1, service_end):
+        line = lines[idx]
+        if line.strip() and _indent(line) <= volumes_indent:
+            volumes_end = idx
+            break
+    return volumes_idx, volumes_end, volumes_indent
 
-    value = line[2:].strip()
+
+def _unquote(value: str) -> str:
+    value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        value = value[1:-1]
-
-    marker = f":{TARGET}"
-    if marker not in value:
-        raise ValueError("could not determine rest_service.py bind-mount source")
-    return value.split(marker, 1)[0]
+        return value[1:-1]
+    return value
 
 
-def _remove_target_lines(lines: list[str], service_name: str) -> list[str]:
-    target_indexes = _service_target_lines(lines, service_name)
-    for idx in target_indexes:
-        if not lines[idx].strip().startswith("- "):
+def _parse_short_mount(line: str, item_indent: int, index: int) -> VolumeMount | None:
+    if _indent(line) != item_indent:
+        return None
+    stripped = line.strip()
+    if not stripped.startswith("- "):
+        return None
+    value = _unquote(stripped[2:].strip())
+    if not value or value.startswith(("type:", "source:", "target:")):
+        return None
+
+    parts = value.split(":")
+    if len(parts) < 2:
+        return None
+    source = parts[0]
+    target = parts[1]
+    options = ":".join(parts[2:]) if len(parts) > 2 else None
+    return VolumeMount(index=index, source=source, target=target, options=options)
+
+
+def _target_mounts(lines: list[str], service_name: str) -> list[VolumeMount]:
+    bounds = _volumes_bounds(lines, service_name)
+    if bounds is None:
+        return []
+    volumes_idx, volumes_end, volumes_indent = bounds
+    item_indent = volumes_indent + 2
+
+    for idx in range(volumes_idx + 1, volumes_end):
+        line = lines[idx]
+        if _indent(line) <= item_indent:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("target:") and _unquote(stripped.split(":", 1)[1]) == TARGET:
             raise ValueError(
                 "existing rest_service.py mount uses unsupported long syntax; refusing partial rewrite"
             )
-    target_set = set(target_indexes)
-    return [line for idx, line in enumerate(lines) if idx not in target_set]
+
+    mounts: list[VolumeMount] = []
+    for idx in range(volumes_idx + 1, volumes_end):
+        mount = _parse_short_mount(lines[idx], item_indent, idx)
+        if mount is not None and mount.target == TARGET:
+            mounts.append(mount)
+
+    if len(mounts) > 1:
+        raise ValueError("multiple exact rest_service.py mounts found for selected service")
+    return mounts
+
+
+def service_has_mount(text: str, service_name: str) -> bool:
+    return bool(_target_mounts(text.splitlines(), service_name))
+
+
+def mount_source(text: str, service_name: str) -> str | None:
+    mounts = _target_mounts(text.splitlines(), service_name)
+    return mounts[0].source if mounts else None
+
+
+def _remove_target_mount(lines: list[str], service_name: str) -> list[str]:
+    mounts = _target_mounts(lines, service_name)
+    if not mounts:
+        return lines
+    idx = mounts[0].index
+    return lines[:idx] + lines[idx + 1 :]
 
 
 def _remove_empty_service_volumes(lines: list[str], service_name: str) -> list[str]:
-    service_idx, service_end, _ = _service_bounds(lines, service_name)
-    idx = service_idx + 1
-    while idx < service_end:
+    bounds = _volumes_bounds(lines, service_name)
+    if bounds is None:
+        return lines
+    volumes_idx, volumes_end, volumes_indent = bounds
+    item_indent = volumes_indent + 2
+
+    meaningful = []
+    for idx in range(volumes_idx + 1, volumes_end):
         line = lines[idx]
-        if line.strip() != "volumes:":
-            idx += 1
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-
-        vol_indent = _indent(line)
-        end = idx + 1
-        has_item = False
-        while end < service_end:
-            next_line = lines[end]
-            if next_line.strip() and _indent(next_line) <= vol_indent:
-                break
-            if next_line.strip().startswith("- "):
-                has_item = True
-            end += 1
-
-        if not has_item:
-            return lines[:idx] + lines[end:]
-        idx = end
-    return lines
+        if _indent(line) >= item_indent:
+            meaningful.append(idx)
+    if meaningful:
+        return lines
+    return lines[:volumes_idx] + lines[volumes_end:]
 
 
 def remove_mount(text: str, service_name: str) -> str:
     lines = text.splitlines()
     _service_bounds(lines, service_name)
-    lines = _remove_target_lines(lines, service_name)
+    lines = _remove_target_mount(lines, service_name)
     lines = _remove_empty_service_volumes(lines, service_name)
     return "\n".join(lines) + "\n"
 
@@ -143,36 +200,30 @@ def remove_mount(text: str, service_name: str) -> str:
 def add_mount(text: str, service_name: str, patch_file: str) -> str:
     if not patch_file.startswith("/"):
         raise ValueError("patch file path must be absolute")
-    if any(ch in patch_file for ch in ("\n", "\r", '"', ":", "$")):
+    if any(ch in patch_file for ch in ("\n", "\r", '"', "'", ":", "$")):
         raise ValueError("patch file path contains unsupported characters")
 
     lines = text.splitlines()
     _service_bounds(lines, service_name)
-    lines = _remove_target_lines(lines, service_name)
+    mounts = _target_mounts(lines, service_name)
+    if mounts and mounts[0].source == patch_file and mounts[0].options == "ro":
+        return "\n".join(lines) + "\n"
+    if mounts:
+        lines = _remove_target_mount(lines, service_name)
+
     service_idx, service_end, service_indent = _service_bounds(lines, service_name)
-
+    bounds = _volumes_bounds(lines, service_name)
     mount_line = f'- "{patch_file}:{TARGET}:ro"'
-    volumes_idx = None
-    for idx in range(service_idx + 1, service_end):
-        if lines[idx].strip() == "volumes:":
-            volumes_idx = idx
-            break
 
-    if volumes_idx is None:
+    if bounds is None:
         key_indent = " " * (service_indent + 2)
         item_indent = " " * (service_indent + 4)
         lines.insert(service_end, key_indent + "volumes:")
         lines.insert(service_end + 1, item_indent + mount_line)
     else:
-        vol_indent = _indent(lines[volumes_idx])
-        item_indent = " " * (vol_indent + 2)
-        insert_at = volumes_idx + 1
-        while insert_at < service_end:
-            line = lines[insert_at]
-            if line.strip() and _indent(line) <= vol_indent:
-                break
-            insert_at += 1
-        lines.insert(insert_at, item_indent + mount_line)
+        volumes_idx, volumes_end, volumes_indent = bounds
+        item_indent = " " * (volumes_indent + 2)
+        lines.insert(volumes_end, item_indent + mount_line)
 
     return "\n".join(lines) + "\n"
 
