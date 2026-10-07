@@ -6,10 +6,10 @@ The project is intentionally limited to the Marzban Node host. It does **not** m
 
 ## Install the stable release
 
-The recommended production-facing install path is the latest tagged release. For `v0.2.0`:
+The recommended production-facing install path is the latest tagged release. For `v0.2.1`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env REF=v0.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env REF=v0.2.1 bash
 ```
 
 Both the installer URL and `REF` are pinned to the same release. The installer then resolves `REF` once to an immutable commit SHA and downloads the CLI and both Python helpers from that exact snapshot. It validates their syntax, installs them under `/usr/local/`, and runs `apply` unless `AUTO_APPLY=0` is set.
@@ -76,8 +76,8 @@ COMPOSE_FILE=/opt/marzban-node/docker-compose.yml
 If paths or service names differ:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env \
-  REF=v0.2.0 \
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env \
+  REF=v0.2.1 \
   COMPOSE_FILE=/opt/marzban-node/docker-compose.yml \
   CONTAINER_NAME=marzban-node \
   SERVICE_NAME=marzban-node \
@@ -87,8 +87,8 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.
 Runtime tuning:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env \
-  REF=v0.2.0 \
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env \
+  REF=v0.2.1 \
   TIMEOUT_SECONDS=7 \
   RESTART_GRACE_SECONDS=60 \
   bash
@@ -103,7 +103,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.
 ## Install only without applying
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.0/install.sh | sudo env REF=v0.2.0 AUTO_APPLY=0 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env REF=v0.2.1 AUTO_APPLY=0 bash
 ```
 
 Then apply manually:
