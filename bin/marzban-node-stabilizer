@@ -271,7 +271,13 @@ container_image_id() {
 
 container_env_value() {
   local key="$1"
-  docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null \
+  local env_lines
+
+  if ! env_lines="$(docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null)"; then
+    return 2
+  fi
+
+  printf '%s\n' "$env_lines" \
     | awk -F= -v wanted="$key" '
         $1 == wanted {
           found=1
@@ -291,12 +297,18 @@ container_env_value() {
 effective_container_port() {
   local key="$1"
   local default_port="$2"
-  local port
+  local port rc=0
 
   if port="$(container_env_value "$key")"; then
     :
   else
-    port="$default_port"
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      port="$default_port"
+    else
+      warn "Could not inspect effective $key from container $CONTAINER_NAME"
+      return 1
+    fi
   fi
 
   if ! is_uint "$port" || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
