@@ -148,6 +148,55 @@ if effective_container_port XRAY_API_PORT 62051 >/dev/null 2>&1; then
   fail "invalid XRAY_API_PORT was accepted"
 fi
 
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    printf '%s\n' 'XRAY_API_PORT='
+    return 0
+  fi
+  return 1
+}
+if effective_container_port XRAY_API_PORT 62051 >/dev/null 2>&1; then
+  fail "explicitly empty XRAY_API_PORT incorrectly fell back to the default"
+fi
+
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    printf '%s\n' 'SERVICE_PORT='
+    return 0
+  fi
+  return 1
+}
+if effective_container_port SERVICE_PORT 62050 >/dev/null 2>&1; then
+  fail "explicitly empty SERVICE_PORT incorrectly fell back to the default"
+fi
+
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    cat <<'EOF_DUP_EMPTY'
+XRAY_API_PORT=62061
+XRAY_API_PORT=
+EOF_DUP_EMPTY
+    return 0
+  fi
+  return 1
+}
+if effective_container_port XRAY_API_PORT 62051 >/dev/null 2>&1; then
+  fail "last duplicate empty XRAY_API_PORT was not treated as the effective invalid value"
+fi
+
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    cat <<'EOF_DUP_VALID'
+XRAY_API_PORT=
+XRAY_API_PORT=62062
+EOF_DUP_VALID
+    return 0
+  fi
+  return 1
+}
+[ "$(effective_container_port XRAY_API_PORT 62051)" = "62062" ] \
+  || fail "last duplicate valid XRAY_API_PORT was not used"
+
 # Stabilizer mount ownership requires path + marker + metadata/hash identity.
 PATCH_DIR="$TMP/patches"
 PATCH_FILE="$PATCH_DIR/rest_service.py"
