@@ -159,6 +159,121 @@ class ComposeMountTests(unittest.TestCase):
             with self.subTest(layout=name):
                 self.assert_layout_rejected_everywhere(text)
 
+    def test_effective_volume_composition_is_rejected_before_mutation(self):
+        cases = {
+            "yaml_merge": """x-node-base: &node_base
+  image: example/node
+  volumes:
+    - /tmp/foreign.py:/code/rest_service.py:ro
+services:
+  marzban-node:
+    <<: *node_base
+    restart: always
+""",
+            "extends_same_file": """services:
+  node-base:
+    image: example/node
+    volumes:
+      - /tmp/foreign.py:/code/rest_service.py:ro
+  marzban-node:
+    extends:
+      service: node-base
+""",
+            "extends_external_file": """services:
+  marzban-node:
+    extends:
+      file: ./base-compose.yml
+      service: node-base
+""",
+            "quoted_volumes_key": """services:
+  marzban-node:
+    image: example/node
+    "volumes":
+      - /tmp/foreign.py:/code/rest_service.py:ro
+""",
+            "single_quoted_volumes_key": """services:
+  marzban-node:
+    image: example/node
+    'volumes':
+      - /tmp/foreign.py:/code/rest_service.py:ro
+""",
+            "explicit_volumes_key": """services:
+  marzban-node:
+    image: example/node
+    ? volumes
+    :
+      - /tmp/foreign.py:/code/rest_service.py:ro
+""",
+        }
+        for name, text in cases.items():
+            with self.subTest(layout=name):
+                self.assert_layout_rejected_everywhere(text)
+
+    def test_other_service_mount_inheritance_mechanisms_are_rejected(self):
+        for key, value in {
+            "volumes_from": "node-base",
+            "configs": "app-config",
+            "secrets": "app-secret",
+            "tmpfs": "/code",
+            "devices": "/dev/null:/code/rest_service.py",
+        }.items():
+            text = f"""services:
+  marzban-node:
+    image: example/node
+    {key}:
+      - {value}
+"""
+            with self.subTest(key=key):
+                self.assert_layout_rejected_everywhere(text)
+
+    def test_selected_service_alias_anchor_inline_and_quoted_forms_are_rejected(self):
+        cases = {
+            "anchor": """services:
+  marzban-node: &node
+    image: example/node
+""",
+            "alias": """x-node: &node
+  image: example/node
+services:
+  marzban-node: *node
+""",
+            "flow": """services:
+  marzban-node: {image: example/node}
+""",
+            "quoted": """services:
+  "marzban-node":
+    image: example/node
+""",
+            "explicit_key": """services:
+  ? marzban-node
+  :
+    image: example/node
+""",
+        }
+        for name, text in cases.items():
+            with self.subTest(layout=name):
+                self.assert_layout_rejected_everywhere(text)
+
+    def test_unrelated_simple_service_keys_remain_supported(self):
+        text = """x-env: &shared_env
+  NOTE: /code/rest_service.py
+services:
+  marzban-node:
+    image: example/node
+    environment: *shared_env
+    labels:
+      example: value
+    command:
+      - sh
+      - -c
+      - echo /code/rest_service.py
+"""
+        self.assertFalse(compose_mount.service_has_mount(text, "marzban-node"))
+        mounted = compose_mount.add_mount(text, "marzban-node", "/opt/mns/rest_service.py")
+        self.assertIn("/opt/mns/rest_service.py:/code/rest_service.py:ro", mounted)
+        restored = compose_mount.remove_mount(mounted, "marzban-node")
+        self.assertEqual(restored, text)
+
     def test_interpolated_short_syntax_is_rejected_before_mutation(self):
         text = """services:
   marzban-node:
