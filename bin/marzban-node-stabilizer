@@ -342,6 +342,39 @@ EOF
   atomic_install_file "$temp_metadata" "$METADATA_FILE" 0644
 }
 
+verify_recovered_patch_image_identity() {
+  local mount_source stored_image_id actual_image_id
+
+  if ! mount_source="$(compose_mount_source)"; then
+    warn "Rollback recovery could not inspect the restored rest_service.py mount."
+    return 1
+  fi
+  [ -n "$mount_source" ] || return 0
+
+  if [ "$mount_source" != "$PATCH_FILE" ]; then
+    warn "Rollback recovery found a foreign rest_service.py mount: $mount_source"
+    return 1
+  fi
+  if ! verify_stabilizer_mount_identity "$mount_source"; then
+    warn "Rollback recovery could not verify Stabilizer ownership of the restored mount."
+    return 1
+  fi
+
+  stored_image_id="$(metadata_value IMAGE_ID || true)"
+  actual_image_id="$(container_image_id)"
+  if [ -z "$stored_image_id" ] || [ -z "$actual_image_id" ]; then
+    warn "Rollback recovery could not verify patch/image identity."
+    return 1
+  fi
+  if [ "$stored_image_id" = "$actual_image_id" ]; then
+    return 0
+  fi
+
+  warn "Rollback recovered image $actual_image_id but the restored patch belongs to $stored_image_id; disabling the stale mount."
+  disable_stale_stabilizer_mount_after_incompatibility || true
+  return 1
+}
+
 recover_service_after_compose_restore() {
   if ! compose_validate >/dev/null 2>&1; then
     warn "Rollback recovery failed: restored Compose does not validate. Backup: $LAST_COMPOSE_BACKUP"
@@ -353,6 +386,10 @@ recover_service_after_compose_restore() {
   fi
   if ! wait_for_container; then
     warn "Rollback recovery failed: recreated container did not become running. Backup: $LAST_COMPOSE_BACKUP"
+    return 1
+  fi
+  if ! verify_recovered_patch_image_identity; then
+    warn "Rollback recovery failed runtime patch/image identity verification. Backup: $LAST_COMPOSE_BACKUP"
     return 1
   fi
   return 0
