@@ -98,6 +98,8 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.
 
 `RESTART_GRACE_SECONDS` controls same-config restart deduplication. A different config is never ignored because of the grace period.
 
+`STARTUP_WAIT_SECONDS` controls only the non-fatal post-apply observation window after the service is recreated. Its default is `30` seconds, and the command exits earlier as soon as Xray is detected. It is separate from the `TIMEOUT_SECONDS=7` request-budget protection. Runtime detection reads Linux `/proc` directly, so minimal Marzban Node images do not need `pgrep` or `ss` installed.
+
 ## Install only without applying
 
 ```bash

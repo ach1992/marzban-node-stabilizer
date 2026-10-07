@@ -10,12 +10,14 @@ fail() {
   exit 1
 }
 
+[ "$STARTUP_WAIT_SECONDS" = "30" ] || fail "default STARTUP_WAIT_SECONDS is not 30 seconds"
 TIMEOUT_SECONDS=60
 RESTART_GRACE_SECONDS=60
 STARTUP_WAIT_SECONDS=70
 START_WAIT_SECONDS=15
 normalize_settings >/dev/null 2>&1
 [ "$TIMEOUT_SECONDS" = "7" ] || fail "TIMEOUT_SECONDS was not clamped to 7"
+[ "$STARTUP_WAIT_SECONDS" = "70" ] || fail "STARTUP_WAIT_SECONDS override was not preserved"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
@@ -318,5 +320,106 @@ fi
   || fail "restore rollback failure did not put the previous Compose file back on disk"
 grep -Fq 'rollback runtime recovery FAILED' "$TMP/restore-rollback-failure.log" \
   || fail "restore did not surface rollback runtime recovery failure"
+
+
+# Runtime process detection must not depend on pgrep. The wrapper preserves
+# present / absent / unknown rather than collapsing Docker/inspection errors.
+(
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  CONTAINER_NAME=marzban-node
+  MOCK_PROCESS_RC=0
+  docker() {
+    [ "${1:-}" = "exec" ] || return 125
+    return "$MOCK_PROCESS_RC"
+  }
+  xray_process_state
+  MOCK_PROCESS_RC=1
+  if xray_process_state; then exit 11; else [ "$?" -eq 1 ] || exit 12; fi
+  MOCK_PROCESS_RC=125
+  if xray_process_state; then exit 13; else [ "$?" -eq 2 ] || exit 14; fi
+) || fail "Xray process-state return semantics are incorrect"
+
+# A detected Xray process must end the post-apply observation immediately.
+(
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  STARTUP_WAIT_SECONDS=30
+  container_is_running() { return 0; }
+  xray_process_state() { return 0; }
+  sleep() { exit 91; }
+  wait_for_xray_or_timeout >/dev/null
+) || fail "post-apply Xray wait did not exit immediately when Xray was detected"
+
+# Unknown process inspection is not equivalent to Xray absence and must not
+# burn the entire observation timeout retrying an inspection that cannot work.
+if (
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  STARTUP_WAIT_SECONDS=30
+  container_is_running() { return 0; }
+  xray_process_state() { return 2; }
+  sleep() { exit 92; }
+  wait_for_xray_or_timeout
+); then
+  fail "unknown Xray inspection unexpectedly succeeded"
+else
+  rc=$?
+fi
+[ "$rc" -eq 2 ] || fail "unknown Xray inspection did not preserve rc=2 without waiting"
+
+# Listener detection parses Linux /proc socket tables and therefore does not
+# require ss inside the container.
+(
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  CONTAINER_NAME=marzban-node
+  docker() {
+    [ "${1:-}" = "exec" ] || return 125
+    cat <<'EOF_PROC_TCP'
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:F263 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1
+EOF_PROC_TCP
+    return 0
+  }
+  container_tcp_listener_state 62051
+  if container_tcp_listener_state 62052; then exit 21; else [ "$?" -eq 1 ] || exit 22; fi
+) || fail "dependency-free /proc listener detection is incorrect"
+
+(
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  CONTAINER_NAME=marzban-node
+  docker() { return 125; }
+  if container_tcp_listener_state 62051; then exit 31; else [ "$?" -eq 2 ] || exit 32; fi
+) || fail "listener inspection failure was not preserved as unknown"
+
+# diagnose must distinguish unknown process inspection from a confirmed absence.
+DIAG_UNKNOWN="$(
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  container_exists() { return 0; }
+  container_is_running() { return 0; }
+  xray_process_state() { return 2; }
+  diagnose_runtime_health
+)"
+printf '%s\n' "$DIAG_UNKNOWN" | grep -Fq 'readiness-unknown: container is running but the Xray process state could not be inspected' \
+  || fail "diagnose did not report unknown process inspection correctly"
+if printf '%s\n' "$DIAG_UNKNOWN" | grep -Fq 'xray-unavailable'; then
+  fail "diagnose converted unknown process inspection into xray-unavailable"
+fi
+
+DIAG_READY="$(
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  container_exists() { return 0; }
+  container_is_running() { return 0; }
+  xray_process_state() { return 0; }
+  effective_container_port() { printf '%s\n' '62051'; }
+  container_tcp_listener_state() { return 0; }
+  diagnose_runtime_health
+)"
+printf '%s\n' "$DIAG_READY" | grep -Fq 'basic-ready: Xray is running and the effective API listener (62051) is present' \
+  || fail "diagnose did not report dependency-free basic readiness"
 
 echo "shell logic tests: OK"
