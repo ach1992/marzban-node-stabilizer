@@ -161,6 +161,28 @@ PY_EFFECTIVE
   done
 }
 
+ANCESTOR_TARGET_FILE="$TMP/ancestor-target.yml"
+cat > "$ANCESTOR_TARGET_FILE" <<'EOF_ANCESTOR_TARGET'
+services:
+  marzban-node:
+    image: alpine:3.20
+    volumes:
+      - /tmp/foreign-tree:/code:ro
+    command: ["sleep", "infinity"]
+EOF_ANCESTOR_TARGET
+assert_valid_compose_and_rejected ancestor-target "$ANCESTOR_TARGET_FILE"
+
+ROOT_ANCESTOR_TARGET_FILE="$TMP/root-ancestor-target.yml"
+cat > "$ROOT_ANCESTOR_TARGET_FILE" <<'EOF_ROOT_ANCESTOR_TARGET'
+services:
+  marzban-node:
+    image: alpine:3.20
+    volumes:
+      - /tmp/foreign-root:/:ro
+    command: ["sleep", "infinity"]
+EOF_ROOT_ANCESTOR_TARGET
+assert_valid_compose_and_rejected root-ancestor-target "$ROOT_ANCESTOR_TARGET_FILE"
+
 DOT_TARGET_FILE="$TMP/dot-target.yml"
 cat > "$DOT_TARGET_FILE" <<'EOF_DOT_TARGET'
 services:
