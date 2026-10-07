@@ -107,11 +107,34 @@ def _unquote_scalar(value: str) -> str:
 
 
 def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]:
-    services = [
-        (idx, _indent(line))
-        for idx, line in enumerate(lines)
-        if line.strip() == "services:"
-    ]
+    services: list[tuple[int, int]] = []
+
+    # The path from the YAML root to the selected service is intentionally
+    # narrow too. Reject semantic/quoted/explicit/merge root keys instead of
+    # allowing an alternate effective "services" mapping to coexist with the
+    # literal block this helper edits.
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or _indent(line) != 0:
+            continue
+
+        normalized = _strip_inline_comment(stripped)
+        match = _SERVICE_KEY_RE.fullmatch(normalized)
+        if match is None:
+            raise ValueError(
+                "top-level Compose mapping uses unsupported YAML key syntax"
+            )
+
+        key = match.group(1)
+        value = match.group(2).strip()
+        if key == "services":
+            if value:
+                raise ValueError(
+                    "services must use a literal block mapping; inline/alias/anchor "
+                    "representations are unsupported"
+                )
+            services.append((idx, 0))
+
     if len(services) != 1:
         raise ValueError(f"expected exactly one services: section, found {len(services)}")
     services_idx, services_indent = services[0]
@@ -119,7 +142,10 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
     section_end = len(lines)
     for idx in range(services_idx + 1, len(lines)):
         line = lines[idx]
-        if line.strip() and _indent(line) <= services_indent:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _indent(line) <= services_indent:
             section_end = idx
             break
 
@@ -127,26 +153,21 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
     matches: list[int] = []
     for idx in range(services_idx + 1, section_end):
         line = lines[idx]
-        if not line.strip() or line.lstrip().startswith("#"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
         if _indent(line) != expected_service_indent:
             continue
 
-        normalized = _strip_inline_comment(line.strip())
+        normalized = _strip_inline_comment(stripped)
         match = _SERVICE_BLOCK_RE.fullmatch(normalized)
-        if match is not None:
-            if match.group(1) == service_name:
-                matches.append(idx)
-            continue
-
-        # A selected service expressed as a quoted key, explicit YAML key,
-        # alias/anchor value, or inline/flow mapping is outside the narrow
-        # grammar. Treat it as unsafe rather than accidentally editing a
-        # different semantic service entry.
-        if service_name in normalized:
+        if match is None:
             raise ValueError(
-                f"Compose service {service_name!r} uses unsupported key/value syntax"
+                "services mapping uses unsupported service key/value syntax; "
+                "service definitions must be literal block mappings"
             )
+        if match.group(1) == service_name:
+            matches.append(idx)
 
     if len(matches) != 1:
         raise ValueError(
@@ -158,7 +179,10 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
     service_end = section_end
     for idx in range(service_idx + 1, section_end):
         line = lines[idx]
-        if line.strip() and _indent(line) <= service_indent:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _indent(line) <= service_indent:
             service_end = idx
             break
 
