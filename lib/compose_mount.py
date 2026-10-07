@@ -28,6 +28,7 @@ _MAPPING_ITEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*:(?:\s|$)")
 _SERVICE_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(.*)$")
 _SERVICE_BLOCK_RE = re.compile(r"^([A-Za-z0-9_.-]+)\s*:\s*$")
 _UNSUPPORTED_SCALAR_PREFIXES = ("{", "[", "&", "*", "!", "?", "|", ">")
+_ROOT_KEYS_AFFECTING_SERVICE_OWNERSHIP = frozenset({"include"})
 _SERVICE_KEYS_AFFECTING_MOUNT_OWNERSHIP = frozenset(
     {
         "extends",
@@ -127,6 +128,11 @@ def _service_bounds(lines: list[str], service_name: str) -> tuple[int, int, int]
 
         key = match.group(1)
         value = match.group(2).strip()
+        if key in _ROOT_KEYS_AFFECTING_SERVICE_OWNERSHIP:
+            raise ValueError(
+                f"top-level Compose key {key!r} can change the effective services model "
+                "and is unsupported by the narrow Compose editor"
+            )
         if key == "services":
             if value:
                 raise ValueError(
