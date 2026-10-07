@@ -58,6 +58,7 @@ docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d marzban-node >/dev/null
 
 run_cli() {
   env \
+    COMPOSE_PROJECT_NAME="$PROJECT" \
     CONTAINER_NAME="$CONTAINER_NAME" \
     SERVICE_NAME=marzban-node \
     COMPOSE_FILE="$COMPOSE_FILE" \
