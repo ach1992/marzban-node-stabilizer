@@ -440,6 +440,16 @@ services:
             with self.subTest(target_form=name):
                 self.assert_layout_rejected_everywhere(text)
 
+    def test_ancestor_mount_targets_that_own_managed_file_fail_closed(self):
+        for target in ("/code", "/"):
+            text = f"""services:
+  marzban-node:
+    volumes:
+      - /tmp/foreign-tree:{target}:ro
+"""
+            with self.subTest(target=target):
+                self.assert_layout_rejected_everywhere(text)
+
     def test_canonical_equivalent_duplicate_targets_fail_closed(self):
         text = """services:
   marzban-node:
