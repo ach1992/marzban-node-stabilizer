@@ -161,6 +161,28 @@ PY_EFFECTIVE
   done
 }
 
+ANONYMOUS_TARGET_FILE="$TMP/anonymous-target.yml"
+cat > "$ANONYMOUS_TARGET_FILE" <<'EOF_ANONYMOUS_TARGET'
+services:
+  marzban-node:
+    image: alpine:3.20
+    volumes:
+      - /code
+    command: ["sleep", "infinity"]
+EOF_ANONYMOUS_TARGET
+assert_valid_compose_and_rejected anonymous-target "$ANONYMOUS_TARGET_FILE"
+
+ANONYMOUS_ALIAS_FILE="$TMP/anonymous-alias-target.yml"
+cat > "$ANONYMOUS_ALIAS_FILE" <<'EOF_ANONYMOUS_ALIAS'
+services:
+  marzban-node:
+    image: alpine:3.20
+    volumes:
+      - /code/./rest_service.py
+    command: ["sleep", "infinity"]
+EOF_ANONYMOUS_ALIAS
+assert_canonicalized_target_and_rejected anonymous-alias-target "$ANONYMOUS_ALIAS_FILE"
+
 ANCESTOR_TARGET_FILE="$TMP/ancestor-target.yml"
 cat > "$ANCESTOR_TARGET_FILE" <<'EOF_ANCESTOR_TARGET'
 services:
