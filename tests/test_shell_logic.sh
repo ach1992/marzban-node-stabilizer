@@ -86,6 +86,43 @@ fi
 
 wait "$holder_pid"
 
+# Diagnostics must derive effective service/API ports from the running container
+# rather than hardcoding Marzban defaults.
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    cat <<'EOF_ENV'
+SERVICE_PORT=62060
+XRAY_API_PORT=62061
+EOF_ENV
+    return 0
+  fi
+  return 1
+}
+CONTAINER_NAME=marzban-node
+[ "$(container_env_value SERVICE_PORT)" = "62060" ] || fail "SERVICE_PORT was not read from container env"
+[ "$(container_env_value XRAY_API_PORT)" = "62061" ] || fail "XRAY_API_PORT was not read from container env"
+[ "$(effective_container_port SERVICE_PORT 62050)" = "62060" ] || fail "effective SERVICE_PORT ignored container env"
+[ "$(effective_container_port XRAY_API_PORT 62051)" = "62061" ] || fail "effective XRAY_API_PORT ignored container env"
+
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    return 0
+  fi
+  return 1
+}
+[ "$(effective_container_port XRAY_API_PORT 62051)" = "62051" ] || fail "XRAY_API_PORT default was not used when unset"
+
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    printf '%s\n' 'XRAY_API_PORT=not-a-port'
+    return 0
+  fi
+  return 1
+}
+if effective_container_port XRAY_API_PORT 62051 >/dev/null 2>&1; then
+  fail "invalid XRAY_API_PORT was accepted"
+fi
+
 # Stabilizer mount ownership requires path + marker + metadata/hash identity.
 PATCH_DIR="$TMP/patches"
 PATCH_FILE="$PATCH_DIR/rest_service.py"
