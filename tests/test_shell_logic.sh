@@ -197,6 +197,16 @@ EOF_DUP_VALID
 [ "$(effective_container_port XRAY_API_PORT 62051)" = "62062" ] \
   || fail "last duplicate valid XRAY_API_PORT was not used"
 
+docker() {
+  if [ "${1:-}" = "container" ] && [ "${2:-}" = "inspect" ]; then
+    return 2
+  fi
+  return 1
+}
+if effective_container_port XRAY_API_PORT 62051 >/dev/null 2>&1; then
+  fail "container inspect failure incorrectly fell back to the default port"
+fi
+
 # Stabilizer mount ownership requires path + marker + metadata/hash identity.
 PATCH_DIR="$TMP/patches"
 PATCH_FILE="$PATCH_DIR/rest_service.py"
