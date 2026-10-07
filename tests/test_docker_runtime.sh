@@ -241,13 +241,11 @@ if grep -Fq 'pgrep: not found' "$STATUS_PROBE" || grep -Fq "'ss' is unavailable"
 fi
 
 before="$(monotonic_ms)"
-(
-  # shellcheck source=../bin/marzban-node-stabilizer
-  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
-  CONTAINER_NAME="$CONTAINER_NAME"
-  STARTUP_WAIT_SECONDS=5
-  wait_for_xray_or_timeout >/dev/null
-)
+env \
+  CONTAINER_NAME="$CONTAINER_NAME" \
+  STARTUP_WAIT_SECONDS=5 \
+  bash -c '. "$1" help >/dev/null; wait_for_xray_or_timeout >/dev/null' \
+    _ "$ROOT/bin/marzban-node-stabilizer"
 after="$(monotonic_ms)"
 [ $((after - before)) -lt 2000 ] || fail "dependency-free Xray observation did not exit promptly"
 
