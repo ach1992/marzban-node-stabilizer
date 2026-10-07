@@ -274,11 +274,16 @@ container_env_value() {
   docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null \
     | awk -F= -v wanted="$key" '
         $1 == wanted {
+          found=1
           sub(/^[^=]*=/, "")
           value=$0
         }
         END {
-          if (value != "") print value
+          if (found) {
+            print value
+            exit 0
+          }
+          exit 1
         }
       '
 }
@@ -288,11 +293,14 @@ effective_container_port() {
   local default_port="$2"
   local port
 
-  port="$(container_env_value "$key" || true)"
-  [ -n "$port" ] || port="$default_port"
+  if port="$(container_env_value "$key")"; then
+    :
+  else
+    port="$default_port"
+  fi
 
   if ! is_uint "$port" || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-    warn "Invalid effective $key value: $port"
+    warn "Invalid effective $key value: ${port:-<empty>}"
     return 1
   fi
   printf '%s\n' "$port"
