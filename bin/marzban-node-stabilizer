@@ -256,20 +256,32 @@ ensure_container_exists() {
   container_exists || error "Compose create did not produce the expected container: $CONTAINER_NAME"
 }
 
-extract_image_rest_service() {
-  local destination="$1"
+container_image_id() {
+  docker container inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+extract_rest_service_from_image() {
+  local image_id="$1"
+  local destination="$2"
   local temp_container=""
 
-  ensure_container_exists
-  CURRENT_IMAGE_ID="$(docker container inspect -f '{{.Image}}' "$CONTAINER_NAME")"
-  [ -n "$CURRENT_IMAGE_ID" ] || error "Could not determine image ID for $CONTAINER_NAME"
-
-  temp_container="$(docker create "$CURRENT_IMAGE_ID")" || error "Could not create temporary container from $CURRENT_IMAGE_ID"
+  [ -n "$image_id" ] || return 1
+  temp_container="$(docker create "$image_id")" || return 1
   if ! docker cp "$temp_container:/code/rest_service.py" "$destination"; then
     docker rm -f "$temp_container" >/dev/null 2>&1 || true
-    error "Could not copy image-provided /code/rest_service.py"
+    return 1
   fi
   docker rm -f "$temp_container" >/dev/null
+}
+
+extract_image_rest_service() {
+  local destination="$1"
+
+  ensure_container_exists
+  CURRENT_IMAGE_ID="$(container_image_id)"
+  [ -n "$CURRENT_IMAGE_ID" ] || error "Could not determine image ID for $CONTAINER_NAME"
+  extract_rest_service_from_image "$CURRENT_IMAGE_ID" "$destination" \
+    || error "Could not copy image-provided /code/rest_service.py from $CURRENT_IMAGE_ID"
 }
 
 atomic_install_file() {
@@ -294,6 +306,23 @@ metadata_value() {
   awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$METADATA_FILE"
 }
 
+verify_stabilizer_mount_identity() {
+  local mount_source="$1"
+  local stored_patch_sha actual_patch_sha patch_format
+
+  [ "$mount_source" = "$PATCH_FILE" ] || return 1
+  host_patch_file_is_valid || return 1
+  [ -f "$METADATA_FILE" ] || return 1
+
+  patch_format="$(metadata_value PATCH_FORMAT_VERSION || true)"
+  stored_patch_sha="$(metadata_value PATCH_SHA256 || true)"
+  [ "$patch_format" = "2" ] || return 1
+  [ -n "$stored_patch_sha" ] || return 1
+
+  actual_patch_sha="$(sha256sum "$PATCH_FILE" | awk '{print $1}')"
+  [ "$stored_patch_sha" = "$actual_patch_sha" ]
+}
+
 write_metadata() {
   local source_sha="$1"
   local patch_sha="$2"
@@ -309,6 +338,22 @@ RESTART_GRACE_SECONDS=$RESTART_GRACE_SECONDS
 APPLIED_AT_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   atomic_install_file "$temp_metadata" "$METADATA_FILE" 0644
+}
+
+recover_service_after_compose_restore() {
+  if ! compose_validate >/dev/null 2>&1; then
+    warn "Rollback recovery failed: restored Compose does not validate. Backup: $LAST_COMPOSE_BACKUP"
+    return 1
+  fi
+  if ! compose_up force >/dev/null 2>&1; then
+    warn "Rollback recovery failed: service recreate failed. Backup: $LAST_COMPOSE_BACKUP"
+    return 1
+  fi
+  if ! wait_for_container; then
+    warn "Rollback recovery failed: recreated container did not become running. Backup: $LAST_COMPOSE_BACKUP"
+    return 1
+  fi
+  return 0
 }
 
 rollback_apply() {
@@ -339,9 +384,11 @@ rollback_apply() {
     rm -f -- "$METADATA_FILE"
   fi
 
-  if compose_validate >/dev/null 2>&1; then
-    compose_up force >/dev/null 2>&1 || true
+  if recover_service_after_compose_restore; then
+    info "Previous Compose and runtime state recovered successfully."
+    return 0
   fi
+  return 1
 }
 
 disable_stale_stabilizer_mount_after_incompatibility() {
