@@ -266,6 +266,34 @@ def _volumes_bounds(
     return volumes_idx, volumes_end, volumes_indent
 
 
+def _validate_canonical_container_target(target: str) -> None:
+    """Require a lexical form whose identity already matches runtime identity.
+
+    Compose and Docker canonicalize Linux mount destinations. This editor does
+    not normalize source text and then mutate it; it supports only target paths
+    that are already canonical so raw-text ownership cannot diverge from the
+    effective runtime destination.
+    """
+
+    if not target.startswith("/"):
+        raise ValueError(
+            "non-absolute Compose volume target is unsupported for this Linux deployment boundary"
+        )
+    if "\\" in target:
+        raise ValueError(
+            "backslashes in Compose volume targets are unsupported for ownership-safe rewriting"
+        )
+    if target == "/":
+        return
+
+    segments = target.split("/")[1:]
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise ValueError(
+            "non-canonical Compose volume target is unsupported; "
+            "remove repeated separators and dot/parent path segments before applying"
+        )
+
+
 def _parse_short_mount_scalar(value: str, index: int) -> VolumeMount | None:
     scalar = _unquote_scalar(value)
 
@@ -317,10 +345,8 @@ def _parse_short_mount_scalar(value: str, index: int) -> VolumeMount | None:
 
     if not source:
         raise ValueError("empty Compose volume source is unsupported")
-    if not target.startswith("/"):
-        raise ValueError(
-            "non-absolute Compose volume target is unsupported for this Linux deployment boundary"
-        )
+
+    _validate_canonical_container_target(target)
 
     return VolumeMount(index=index, source=source, target=target, options=options)
 
