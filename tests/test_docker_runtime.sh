@@ -322,7 +322,7 @@ if run_cli restore >"$TMP/foreign-restore.log" 2>&1; then
   fail "restore unexpectedly removed a foreign rest_service.py mount"
 fi
 cmp -s "$COMPOSE_FILE" "$TMP/compose.foreign.before" || fail "foreign-mount restore mutated Compose"
-grep -Fq "Refusing to remove a foreign rest_service.py mount" "$TMP/foreign-restore.log"   || fail "foreign-mount restore refusal was not explicit"
+grep -Fq "foreign mount source" "$TMP/foreign-restore.log"   || fail "foreign-mount restore refusal was not explicit"
 python3 - "$COMPOSE_FILE" "$TMP/foreign-rest_service.py" <<'PY'
 from pathlib import Path
 import sys
