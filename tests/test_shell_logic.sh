@@ -143,6 +143,30 @@ fi
 grep -Fq 'Rollback recovery failed: service recreate failed' "$TMP/recovery-failure.log" \
   || fail "rollback recreate failure was not reported explicitly"
 
+# A rollback that recreates onto a different image may not keep an old owned patch mounted.
+ROLLBACK_STALE_MARKER="$TMP/rollback-stale-disabled"
+if (
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  PATCH_FILE="$TMP/owned-rest-service.py"
+  compose_mount_source() { printf '%s\n' "$PATCH_FILE"; }
+  verify_stabilizer_mount_identity() { return 0; }
+  metadata_value() {
+    [ "$1" = "IMAGE_ID" ] && printf '%s\n' "sha256:old"
+  }
+  container_image_id() { printf '%s\n' "sha256:new"; }
+  disable_stale_stabilizer_mount_after_incompatibility() {
+    : > "$ROLLBACK_STALE_MARKER"
+    return 0
+  }
+  verify_recovered_patch_image_identity
+) >"$TMP/rollback-image-mismatch.log" 2>&1; then
+  fail "rollback image mismatch was incorrectly accepted"
+fi
+[ -f "$ROLLBACK_STALE_MARKER" ] || fail "rollback image mismatch did not disable the stale mount"
+grep -Fq 'restored patch belongs to sha256:old' "$TMP/rollback-image-mismatch.log" \
+  || fail "rollback image mismatch was not reported explicitly"
+
 # Simulate restore primary recreate failure followed by rollback recreate failure.
 RESTORE_COMPOSE="$TMP/restore-compose.yml"
 printf 'services:\n  marzban-node:\n    image: previous\n    volumes:\n      - /tmp/owned.py:/code/rest_service.py:ro\n' > "$RESTORE_COMPOSE"
