@@ -86,6 +86,31 @@ fi
 
 wait "$holder_pid"
 
+# Status inspection must preserve the Compose helper's distinction between
+# "no target mount" (1) and "unsupported/unsafe layout" (2).
+COMPOSE_EDITOR_PATH="$TMP/fake-compose-editor.py"
+cat > "$COMPOSE_EDITOR_PATH" <<'PY_COMPOSE_RC'
+import sys
+sys.exit(2)
+PY_COMPOSE_RC
+if compose_has_rest_service_mount >/dev/null 2>&1; then
+  fail "unsupported Compose helper result was incorrectly treated as success"
+else
+  rc=$?
+fi
+[ "$rc" = "2" ] || fail "unsupported Compose helper result was not preserved"
+
+cat > "$COMPOSE_EDITOR_PATH" <<'PY_COMPOSE_NONE'
+import sys
+sys.exit(1)
+PY_COMPOSE_NONE
+if compose_has_rest_service_mount >/dev/null 2>&1; then
+  fail "missing Compose target mount was incorrectly treated as success"
+else
+  rc=$?
+fi
+[ "$rc" = "1" ] || fail "missing Compose target mount did not preserve rc=1"
+
 # Diagnostics must derive effective service/API ports from the running container
 # rather than hardcoding Marzban defaults.
 docker() {
