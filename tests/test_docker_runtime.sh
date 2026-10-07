@@ -222,6 +222,38 @@ MOUNT_SOURCE="$(python3 "$ROOT/lib/compose_mount.py" source --file "$COMPOSE_FIL
 grep -Fq 'marzban-node-stabilizer: lifecycle-hardening-v2' "$PATCH_DIR/rest_service.py"   || fail "host patch marker missing after apply"
 docker exec "$CONTAINER_NAME" grep -Fq 'marzban-node-stabilizer: lifecycle-hardening-v2' /code/rest_service.py   || fail "container is not using the patched rest_service.py"
 
+# Minimal-image diagnostics must not require pgrep/ss. Create a harmless process
+# whose Linux comm name is exactly xray, then exercise the real /proc-based
+# process/listener inspection against the running upstream container.
+docker cp "$CONTAINER_NAME:/bin/sleep" "$TMP/xray" >/dev/null
+docker cp "$TMP/xray" "$CONTAINER_NAME:/tmp/xray" >/dev/null
+XRAY_PROBE_PID="$(docker exec "$CONTAINER_NAME" sh -c '/tmp/xray 30 >/dev/null 2>&1 & echo $!')"
+sleep 0.2
+STATUS_PROBE="$TMP/minimal-status.log"
+run_cli status >"$STATUS_PROBE" 2>&1
+grep -Eq 'PID=[0-9]+ NAME=xray' "$STATUS_PROBE" \
+  || { cat "$STATUS_PROBE" >&2; fail "status did not detect Xray through /proc"; }
+grep -Fq 'SERVICE_PORT 62050: listening' "$STATUS_PROBE" \
+  || { cat "$STATUS_PROBE" >&2; fail "status did not detect the REST listener through /proc/net/tcp*"; }
+if grep -Fq 'pgrep: not found' "$STATUS_PROBE" || grep -Fq "'ss' is unavailable" "$STATUS_PROBE"; then
+  cat "$STATUS_PROBE" >&2
+  fail "minimal-image status still depends on pgrep/ss"
+fi
+
+before="$(monotonic_ms)"
+(
+  # shellcheck source=../bin/marzban-node-stabilizer
+  source "$ROOT/bin/marzban-node-stabilizer" help >/dev/null
+  CONTAINER_NAME="$CONTAINER_NAME"
+  STARTUP_WAIT_SECONDS=5
+  wait_for_xray_or_timeout >/dev/null
+)
+after="$(monotonic_ms)"
+[ $((after - before)) -lt 2000 ] || fail "dependency-free Xray observation did not exit promptly"
+
+docker exec "$CONTAINER_NAME" sh -c "kill $XRAY_PROBE_PID" >/dev/null 2>&1 || true
+rm -f "$TMP/xray"
+
 run_cli apply >/dev/null
 wait_for_rest || fail "REST service did not recover after idempotent re-apply"
 COUNT="$(grep -Fc '/code/rest_service.py' "$COMPOSE_FILE")"

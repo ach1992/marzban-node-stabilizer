@@ -28,7 +28,7 @@ fi
 
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7}"
 RESTART_GRACE_SECONDS="${RESTART_GRACE_SECONDS:-60}"
-STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-70}"
+STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-30}"
 START_WAIT_SECONDS="${START_WAIT_SECONDS:-15}"
 REQUEST_WAIT_CAP_SECONDS=7
 LOCK_FILE="${LOCK_FILE:-/run/lock/marzban-node-stabilizer.lock}"
@@ -77,7 +77,7 @@ Environment variables:
   PATCH_DIR               Default: /opt/marzban-node-patches
   TIMEOUT_SECONDS         Default: 7 (values above 7 are clamped for current caller compatibility)
   RESTART_GRACE_SECONDS   Default: 60
-  STARTUP_WAIT_SECONDS    Default: 70 (maximum wait; exits early when Xray is seen)
+  STARTUP_WAIT_SECONDS    Default: 30 (non-fatal post-apply observation; exits early when Xray is seen)
   START_WAIT_SECONDS      Default: 15
 USAGE
 }
@@ -316,6 +316,110 @@ effective_container_port() {
     return 1
   fi
   printf '%s\n' "$port"
+}
+
+# Return codes: 0 = Xray present, 1 = inspected and absent, 2 = unknown.
+xray_process_state() {
+  local rc=0
+
+  docker exec "$CONTAINER_NAME" sh -c 'inspected=0
+for proc_dir in /proc/[0-9]*; do
+  [ -r "$proc_dir/comm" ] || continue
+  inspected=1
+  name=""
+  IFS= read -r name < "$proc_dir/comm" || continue
+  case "$name" in
+    xray|xray-*) exit 0 ;;
+  esac
+done
+[ "$inspected" -eq 1 ] && exit 1
+exit 2
+' >/dev/null 2>&1 || rc=$?
+
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Print dependency-free process details. Return codes match xray_process_state.
+xray_process_details() {
+  local output rc=0
+
+  output="$(docker exec "$CONTAINER_NAME" sh -c 'inspected=0
+found=0
+for proc_dir in /proc/[0-9]*; do
+  [ -r "$proc_dir/comm" ] || continue
+  inspected=1
+  name=""
+  IFS= read -r name < "$proc_dir/comm" || continue
+  case "$name" in
+    xray|xray-*)
+      pid=${proc_dir#/proc/}
+      printf "PID=%s NAME=%s\n" "$pid" "$name"
+      found=1
+      ;;
+  esac
+done
+[ "$found" -eq 1 ] && exit 0
+[ "$inspected" -eq 1 ] && exit 1
+exit 2
+')" || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+  [ "$rc" -eq 1 ] && return 1
+  return 2
+}
+
+# Return codes: 0 = listening, 1 = inspected and absent, 2 = unknown.
+container_tcp_listener_state() {
+  local port="$1"
+  local port_hex dump rc=0
+
+  port_hex="$(printf '%04X' "$port")"
+  dump="$(docker exec "$CONTAINER_NAME" sh -c 'readable=0
+for table in /proc/net/tcp /proc/net/tcp6; do
+  [ -r "$table" ] || continue
+  readable=1
+  while IFS= read -r line; do
+    printf "%s\n" "$line"
+  done < "$table"
+done
+[ "$readable" -eq 1 ] || exit 2
+')" || rc=$?
+
+  [ "$rc" -eq 0 ] || return 2
+
+  printf '%s\n' "$dump" | awk -v wanted="$port_hex" '    {
+      split($2, address, ":")
+      if (toupper(address[2]) == wanted && $4 == "0A") {
+        found=1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+print_container_listener_state() {
+  local label="$1"
+  local port="$2"
+  local rc=0
+
+  if [ -z "$port" ]; then
+    echo "$label: unknown (effective port unavailable or invalid)"
+    return 0
+  fi
+
+  container_tcp_listener_state "$port" || rc=$?
+  case "$rc" in
+    0) echo "$label $port: listening" ;;
+    1) echo "$label $port: not detected" ;;
+    *) echo "$label $port: unknown (/proc/net/tcp* could not be inspected)" ;;
+  esac
 }
 
 extract_rest_service_from_image() {
@@ -586,14 +690,27 @@ reconcile_running_image_patch() {
 
 wait_for_xray_or_timeout() {
   local waited=0
+  local process_rc=0
+
   while [ "$waited" -lt "$STARTUP_WAIT_SECONDS" ]; do
     if ! container_is_running; then
       return 1
     fi
-    if docker exec "$CONTAINER_NAME" sh -c 'pgrep -x xray >/dev/null 2>&1' >/dev/null 2>&1; then
-      info "Xray process detected after ${waited}s."
-      return 0
-    fi
+
+    process_rc=0
+    xray_process_state || process_rc=$?
+    case "$process_rc" in
+      0)
+        info "Xray process detected after ${waited}s."
+        return 0
+        ;;
+      1)
+        ;;
+      *)
+        return 2
+        ;;
+    esac
+
     sleep 1
     waited=$((waited + 1))
   done
@@ -695,10 +812,14 @@ apply_patch() {
   fi
 
   if [ "$STARTUP_WAIT_SECONDS" -gt 0 ]; then
+    local wait_rc=0
     info "Waiting up to ${STARTUP_WAIT_SECONDS}s for Xray; this exits early when Xray appears."
-    if ! wait_for_xray_or_timeout; then
-      warn "Xray was not observed within ${STARTUP_WAIT_SECONDS}s. The node service is running; Panel connection/start may still be pending."
-    fi
+    wait_for_xray_or_timeout || wait_rc=$?
+    case "$wait_rc" in
+      0) ;;
+      1) warn "Xray was not observed within ${STARTUP_WAIT_SECONDS}s. The node service is running; Panel connection/start may still be pending." ;;
+      *) warn "Xray process state could not be inspected; skipping the remaining post-apply observation wait." ;;
+    esac
   fi
 
   show_status_core
@@ -754,15 +875,18 @@ show_status_core() {
 
     echo
     echo "[INFO] Xray process inside container:"
-    docker exec "$CONTAINER_NAME" sh -c 'pgrep -a xray || true' || true
+    local xray_details xray_rc=0
+    xray_details="$(xray_process_details)" || xray_rc=$?
+    case "$xray_rc" in
+      0) printf '%s\n' "$xray_details" ;;
+      1) echo "Xray process not detected." ;;
+      *) echo "Xray process state unknown: /proc process metadata could not be inspected." ;;
+    esac
 
     echo
     echo "[INFO] Listening ports inside container:"
-    if [ -n "$service_port" ] && [ -n "$api_port" ]; then
-      docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray|:${service_port}([[:space:]]|$)|:${api_port}([[:space:]]|$)' || true" || true
-    else
-      docker exec "$CONTAINER_NAME" sh -c "ss -tulpen 2>/dev/null | grep -E 'xray' || true" || true
-    fi
+    print_container_listener_state "SERVICE_PORT" "$service_port"
+    print_container_listener_state "XRAY_API_PORT" "$api_port"
   fi
 
   echo
@@ -790,28 +914,41 @@ diagnose_runtime_health() {
     echo "container-unavailable: container exists but is not running"
     return 0
   fi
-  if ! docker exec "$CONTAINER_NAME" sh -c 'pgrep -x xray >/dev/null 2>&1' >/dev/null 2>&1; then
-    echo "xray-unavailable: container is running but the Xray process was not detected"
-    return 0
-  fi
 
-  local api_port
+  local process_rc=0
+  xray_process_state || process_rc=$?
+  case "$process_rc" in
+    0) ;;
+    1)
+      echo "xray-unavailable: container is running but the Xray process was not detected"
+      return 0
+      ;;
+    *)
+      echo "readiness-unknown: container is running but the Xray process state could not be inspected"
+      return 0
+      ;;
+  esac
+
+  local api_port listener_rc=0
   api_port="$(effective_container_port XRAY_API_PORT 62051 || true)"
   if [ -z "$api_port" ]; then
     echo "readiness-unknown: Xray is running but the effective XRAY_API_PORT is invalid"
     return 0
   fi
 
-  if docker exec "$CONTAINER_NAME" sh -c 'command -v ss >/dev/null 2>&1' >/dev/null 2>&1; then
-    if docker exec "$CONTAINER_NAME" sh -c "ss -lnt 2>/dev/null | grep -Eq ':${api_port}([[:space:]]|$)'" >/dev/null 2>&1; then
+  container_tcp_listener_state "$api_port" || listener_rc=$?
+  case "$listener_rc" in
+    0)
       echo "basic-ready: Xray is running and the effective API listener ($api_port) is present"
       echo "note: this does not prove end-to-end Panel reachability"
-    else
+      ;;
+    1)
       echo "xray-api-unready: Xray is running but the effective API listener ($api_port) was not detected"
-    fi
-  else
-    echo "readiness-unknown: Xray is running but 'ss' is unavailable inside the container"
-  fi
+      ;;
+    *)
+      echo "readiness-unknown: Xray is running but /proc/net/tcp* could not be inspected"
+      ;;
+  esac
 }
 
 show_diagnostics() {
