@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Shell syntax
+        run: |
+          bash -n install.sh
+          bash -n bin/marzban-node-stabilizer
+          bash -n tests/test_shell_logic.sh
+          bash -n tests/test_installer_snapshot.sh
+          bash -n tests/test_compose_effective_inputs.sh
+          bash -n tests/test_docker_runtime.sh
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+
+      - name: ShellCheck
+        run: shellcheck -x install.sh bin/marzban-node-stabilizer tests/test_installer_snapshot.sh tests/test_compose_effective_inputs.sh tests/test_docker_runtime.sh
+
+      - name: Shell behavior tests
+        run: |
+          bash tests/test_shell_logic.sh
+          bash tests/test_installer_snapshot.sh
+
+      - name: Python syntax
+        run: python3 -m py_compile lib/patch_rest_service.py lib/compose_mount.py
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Compose effective-input fail-closed validation
+        run: bash tests/test_compose_effective_inputs.sh
+
+      - name: Docker runtime and current upstream image compatibility
+        run: sudo bash tests/test_docker_runtime.sh

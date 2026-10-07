@@ -142,15 +142,21 @@ At minimum, keep these checks available for relevant changes:
 ```bash
 bash -n install.sh
 bash -n bin/marzban-node-stabilizer
+python3 -m py_compile lib/patch_rest_service.py lib/compose_mount.py
+python3 -m unittest discover -s tests -v
+bash tests/test_installer_snapshot.sh
+bash tests/test_compose_effective_inputs.sh
 ```
 
-Use ShellCheck when available.
+Use ShellCheck for shell changes. The repository CI should run the same focused validation rather than duplicating multiple equivalent suites.
 
 Behavioral fixes should add focused regression coverage rather than relying only on shell syntax checks.
 
-Patch-transform logic should be tested against representative upstream source fixtures and for repeat/idempotent application.
+Patch-transform logic should be tested against representative reviewed upstream source fixtures and for repeat/idempotent application.
 
-Compose-editing behavior should be tested against representative supported layouts and validated before service recreation.
+Compose-editing behavior should be tested against representative supported layouts and exact mount ownership, and validated before service recreation. The current helper intentionally narrows the entire path from the YAML root to the selected service and its `volumes:` list: the root/service definitions must use literal block mappings with plain keys; service-composition or mount-producing mechanisms the helper does not own (including top-level `include`, YAML merge, `extends`, `volumes_from`, `configs`, `secrets`, `tmpfs`, and `devices`) must fail closed; and the local `volumes:` block supports only single-line short syntax with container targets already expressed as canonical absolute Linux paths. Non-canonical target spellings that Compose/Docker would normalize (including repeated separators and dot/parent segments) must fail closed before ownership comparison. Canonical volume targets that are ancestors of the managed file path must also fail closed because they can own the effective `/code/rest_service.py` content without an exact file-target entry. Anonymous/target-only volume entries are outside the supported ownership grammar and must fail closed because their source ownership is implicit. Unsupported semantic-key forms, mapping/long syntax, or other ambiguous YAML must fail closed before mutation rather than be partially interpreted. Repository tests should include valid Docker Compose fixtures for supported fail-closed cases and should prove effective target canonicalization where ownership depends on consumer semantics, so malformed or semantically irrelevant fixtures cannot create false confidence.
+
+When lifecycle or apply/restore behavior changes, disposable runtime validation must exercise the actual Marzban Node REST service path sufficiently to cover the affected request/concurrency behavior. A container that only sleeps is not sufficient evidence for lifecycle correctness. When relevant, runtime validation should also cover recreated-image identity changes and fail-closed handling of incompatible upstream source.
 
 ## Non-goals
 
