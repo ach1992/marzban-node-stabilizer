@@ -314,11 +314,10 @@ def _parse_short_mount_scalar(value: str, index: int) -> VolumeMount | None:
         )
 
     if ":" not in scalar:
-        if scalar == TARGET:
-            raise ValueError(
-                "anonymous exact rest_service.py target is unsupported; refusing rewrite"
-            )
-        return None
+        raise ValueError(
+            "anonymous/target-only Compose volume entries are unsupported; "
+            "effective ownership requires an explicit source and canonical target"
+        )
 
     parts = scalar.rsplit(":", 2)
     source: str
