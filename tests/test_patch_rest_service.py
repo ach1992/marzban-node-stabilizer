@@ -125,6 +125,7 @@ def install_runtime_stubs():
         def __init__(self, executable_path=None, assets_path=None):
             self._started = False
             self._active_logs = None
+            self._logs_buffer = deque(maxlen=100)
             self.start_count = 0
             self.restart_count = 0
             self.stop_count = 0
@@ -139,7 +140,7 @@ def install_runtime_stubs():
 
         @contextlib.contextmanager
         def get_logs(self):
-            logs = deque()
+            logs = deque(self._logs_buffer, maxlen=100)
             self._active_logs = logs
             try:
                 yield logs
@@ -147,8 +148,11 @@ def install_runtime_stubs():
                 self._active_logs = None
 
         def _emit_started(self):
-            if self.emit_started and self._active_logs is not None:
-                self._active_logs.append("Xray 1.0.0 started")
+            if self.emit_started:
+                log = "Xray 1.0.0 started"
+                self._logs_buffer.append(log)
+                if self._active_logs is not None:
+                    self._active_logs.append(log)
 
         def start(self, config):
             if self._started:
@@ -310,6 +314,20 @@ class PatchedRuntimeBehaviorTests(unittest.TestCase):
         session_id = self.connect()
         self.service.start(session_id=session_id, config='{"a": 1}')
         self.service.restart(session_id=session_id, config='{"a": 2}')
+        self.assertEqual(self.service.core.restart_count, 1)
+        self.assertTrue(self.service.core.started)
+
+    def test_restart_does_not_accept_stale_started_log(self):
+        session_id = self.connect()
+        self.service.start(session_id=session_id, config='{"a": 1}')
+        self.assertIn("Xray 1.0.0 started", self.service.core._logs_buffer)
+
+        self.service.core.emit_started = False
+        started = time.monotonic()
+        self.service.restart(session_id=session_id, config='{"a": 2}')
+        elapsed = time.monotonic() - started
+
+        self.assertGreater(elapsed, 0.8)
         self.assertEqual(self.service.core.restart_count, 1)
         self.assertTrue(self.service.core.started)
 
