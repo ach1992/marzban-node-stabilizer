@@ -1,0 +1,2 @@
+# Exact upstream/manual source fixtures retain their original bytes.
+tests/fixtures/panel/** -whitespace

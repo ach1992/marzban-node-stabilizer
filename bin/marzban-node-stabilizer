@@ -152,6 +152,8 @@ check_compose_editor() {
 
 acquire_lock() {
   mkdir -p -- "$(dirname -- "$LOCK_FILE")"
+  exec 8>"${COMPOSE_FILE}.stabilizer.lock"
+  flock -n 8 || error "Another stabilizer is editing this Compose file."
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
     error "Another ${APP_NAME} apply/restore operation is already running."

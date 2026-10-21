@@ -1,8 +1,8 @@
-# Marzban Node Stabilizer — Project Specification
+# Marzban Stabilizer — Project Specification
 
 ## Purpose
 
-Marzban Node Stabilizer is a small, node-side compatibility and reliability helper for Marzban Node deployments.
+Marzban Stabilizer provides separate Node and Panel compatibility/reliability roles from this repository. The repository name and existing marzban-node-stabilizer command remain stable.
 
 Its purpose is to reduce avoidable startup/restart instability while preserving the upstream Marzban Node operating model and keeping recovery straightforward.
 
@@ -10,11 +10,11 @@ The project should remain small. It is not intended to become a fork of Marzban 
 
 ## Supported boundary
 
-The repository owns only changes that can be delivered from this repository and applied on the Marzban Node host.
+The repository owns the Node runtime patch and the optional Panel runtime patch, with separate installation, status, diagnostics, apply and restore paths. The Owner explicitly expanded the former node-only boundary to both roles.
 
-The Marzban Panel and upstream Marzban repositories are compatibility references, not mutation targets for this project.
+Upstream Marzban and Marzban-node repositories remain read-only compatibility references. This repository distributes bounded source transformations and managed file overrides; it does not fork or mutate either upstream repository.
 
-If a future fix genuinely requires a Panel-side change, that work must be handled as a separate, explicitly authorized change in the appropriate repository. Do not hide a cross-repository dependency inside this stabilizer.
+Selecting one role must never apply changes to the other. Existing Node commands/defaults remain compatible. Panel installation is explicit and does not apply by default; applying both roles at once through the installer is refused so each host/service effect stays reviewable.
 
 ## Design principles
 
@@ -81,7 +81,7 @@ Before recreating services after Compose mutation:
 - validate the resulting Compose configuration;
 - avoid concurrent stabilizer operations racing over the same files.
 
-`restore` must remove the stabilizer override and return the container to the image-provided implementation without requiring chat history or manual reverse engineering.
+`restore` must remove managed overrides and restore the preceding mount topology without requiring chat history. A fresh installation returns to image-provided code. Explicit adoption of the exact reviewed manual Panel bundle instead returns to that prior manual topology; unrelated overrides are never adopted or overwritten implicitly.
 
 ### 7. Diagnostics should explain failure, not add noise
 
@@ -107,11 +107,24 @@ The project currently targets:
 - Debian and Ubuntu hosts;
 - Docker;
 - Docker Compose plugin or legacy `docker-compose`;
-- Marzban Node deployments where the target runtime file is provided by the container image.
+- Marzban Node deployments and explicitly selected Panel Compose installations where runtime sources are image-provided;
+- Panel role additionally requires Docker Compose v2 and a running service for baseline/recovery verification.
 
 Environment overrides documented in the README are part of the supported interface unless deliberately changed and documented.
 
 Compatibility with upstream Marzban Node must be verified from current source at implementation time. Do not assume a previously supported source layout remains unchanged.
+
+## Panel invariants
+
+- Package the reviewed five-file recovery behavior as one coordinated batch: monotonic status cache with lifecycle invalidation, per-node lifecycle admission/pending-config handling, dispatch to connecting nodes, serialized Core updates, and TCP panel listener reservation before lifespan startup.
+- Preserve startup failure exit semantics and DEBUG/Unix-socket behavior.
+- Validate source structure before generating any override. Rebuild from the actual immutable running image on every apply. An incompatible shape is an explicit failure, never silent success; status reports an image/runtime mismatch. Operators must resolve compatibility rather than carry an unreviewed override forward.
+- Preserve environment, database, users, inbounds, certificates, subscription overrides and unrelated Compose properties.
+- Publish all generated files before a single Compose replacement/recreation. Pin that operation to its already installed image without changing the operator image tag in Compose.
+- Reapply of an identical healthy managed bundle must not recreate the service.
+- Reject foreign or ambiguous file ownership by default. Explicit adoption is limited to the exact previously reviewed manual five-file bundle.
+- Keep private durable transaction state and verified runtime hashes. Recover a partial operation explicitly; a pre-recreation failure must not cause an unnecessary service interruption.
+- Share a per-Compose edit lock across both roles. Do not add a periodic restart process.
 
 ## Engineering workflow
 
@@ -166,7 +179,6 @@ This project should not become:
 - a replacement health-monitoring platform;
 - an unconditional periodic restart daemon;
 - a collection of unrelated kernel/network tuning;
-- a place to persist Panel-side changes;
 - a compatibility layer that silently ignores upstream drift.
 
 ## Change discipline

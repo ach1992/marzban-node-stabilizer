@@ -24,10 +24,13 @@ jobs:
         run: |
           bash -n install.sh
           bash -n bin/marzban-node-stabilizer
+          bash -n bin/marzban-panel-stabilizer
+          bash -n bin/marzban-stabilizer
           bash -n tests/test_shell_logic.sh
           bash -n tests/test_installer_snapshot.sh
           bash -n tests/test_compose_effective_inputs.sh
           bash -n tests/test_docker_runtime.sh
+          bash -n tests/test_panel_startup_runtime.sh
 
       - name: Install ShellCheck
         run: |
@@ -35,7 +38,7 @@ jobs:
           sudo apt-get install -y shellcheck
 
       - name: ShellCheck
-        run: shellcheck -x install.sh bin/marzban-node-stabilizer tests/test_installer_snapshot.sh tests/test_compose_effective_inputs.sh tests/test_docker_runtime.sh
+        run: shellcheck -x install.sh bin/marzban-node-stabilizer bin/marzban-panel-stabilizer bin/marzban-stabilizer tests/test_installer_snapshot.sh tests/test_compose_effective_inputs.sh tests/test_docker_runtime.sh tests/test_panel_startup_runtime.sh
 
       - name: Shell behavior tests
         run: |
@@ -43,13 +46,29 @@ jobs:
           bash tests/test_installer_snapshot.sh
 
       - name: Python syntax
-        run: python3 -m py_compile lib/patch_rest_service.py lib/compose_mount.py
+        run: python3 -m py_compile lib/patch_rest_service.py lib/compose_mount.py lib/patch_panel.py lib/panel_stabilizer.py
 
       - name: Unit tests
-        run: python3 -m unittest discover -s tests -v
+        run: >-
+          docker run --rm --network none -e PYTHONPATH=/code
+          -v "$PWD:/work:ro" -w /work --entrypoint python
+          gozargah/marzban@sha256:4c7a449c9cc22f7b08ecc76f21638001987ce7f4a2e3687b84d15e59eed98db5
+          -B -m unittest discover -s tests -v
 
       - name: Compose effective-input fail-closed validation
         run: bash tests/test_compose_effective_inputs.sh
 
       - name: Docker runtime and current upstream image compatibility
         run: sudo bash tests/test_docker_runtime.sh
+
+      - name: Panel and Node integration with real Core traffic
+        run: sudo python3 -B tests/test_panel_docker_runtime.py
+
+      - name: Generated Panel bootstrap and failure regressions
+        run: sudo bash tests/test_panel_startup_runtime.sh
+
+      - name: Python 3.10 host transformer compatibility
+        run: >-
+          docker run --rm --network none -v "$PWD:/work:ro" --entrypoint python
+          python:3.10-slim /work/lib/patch_panel.py
+          --source /work/tests/fixtures/panel/baseline --output /tmp/generated
