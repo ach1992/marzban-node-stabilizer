@@ -15,13 +15,37 @@ sudo marzban-stabilizer panel status
 
 `marzban-node-stabilizer` remains the existing Node entry point. `marzban-panel-stabilizer` is the direct Panel entry point. Neither role invokes the other.
 
-The development installer accepts `MODE=node`, `MODE=panel`, or `MODE=both`. Node remains the default and retains its existing automatic apply behavior. Panel and both default to install-only (`AUTO_APPLY=0`). `MODE=both AUTO_APPLY=1` is refused; apply each role explicitly with its own target settings.
+The installer is noninteractive: choose the role with `MODE` in the installation command. It does not ask you to select a role after starting.
 
-Install the Panel role from a reviewed integrated development state:
+| `MODE` | Commands installed | Default service action |
+| --- | --- | --- |
+| `node` | Node CLI and shared entry point | Applies Node changes (`AUTO_APPLY=1`) |
+| `panel` | Panel CLI and shared entry point | Install only (`AUTO_APPLY=0`) |
+| `both` | Both CLIs and shared entry point | Install only; apply each role separately |
+
+Omitting `MODE` selects `node` for compatibility with existing installations. `MODE=both AUTO_APPLY=1` is refused. An `apply` can recreate the selected Compose service; set `AUTO_APPLY=0` when you want to inspect before applying.
+
+Choose one of these commands for the integrated development code. Each example explicitly installs files only:
+
+Node host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=panel bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=node AUTO_APPLY=0 bash
 ```
+
+Panel host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=panel AUTO_APPLY=0 bash
+```
+
+Host running both services:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=both AUTO_APPLY=0 bash
+```
+
+After installation, invoke the selected role explicitly: `sudo marzban-stabilizer node apply` or `sudo marzban-stabilizer panel apply`. For `both`, configure each role's own Compose service and run those commands separately.
 
 For an unmerged candidate, replace `main` in both the URL and `REF` with its exact commit SHA. All selected components, including the Panel source rules and license, resolve to one immutable snapshot. Use `MODE=both` to install both command sets without changing services.
 
@@ -93,7 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/mai
 
 For normal installs and repeatable recovery, prefer a tagged release.
 
-## What `apply` does
+## What Node `apply` does
 
 The stabilizer rebuilds its patched `/code/rest_service.py` from the **current container image source on every apply** rather than continuing to patch an old host copy.
 
