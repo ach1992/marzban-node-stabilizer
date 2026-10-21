@@ -42,6 +42,7 @@ The Panel role requires Docker Compose v2, Python 3.10+, and an existing running
 PANEL_COMPOSE_FILE=/opt/marzban/docker-compose.yml
 PANEL_SERVICE_NAME=marzban
 PANEL_PATCH_DIR=/opt/marzban-panel-patches
+PANEL_READY_SECONDS=45
 PANEL_WAIT_SECONDS=180
 PANEL_STABLE_SECONDS=30
 ```

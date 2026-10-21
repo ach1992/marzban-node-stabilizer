@@ -6,18 +6,36 @@ import argparse
 import ast
 import hashlib
 import json
+from functools import lru_cache
 from pathlib import Path
 
 SPEC_PATH = Path(__file__).with_name("panel") / "patch-spec.json"
 
 
+@lru_cache(maxsize=1)
 def load_spec():
     return json.loads(SPEC_PATH.read_text())
 
 
 def structural_hash(nodes):
+    def canonical(value):
+        if isinstance(value, ast.AST):
+            return [type(value).__name__, [[name, canonical(item)]
+                    for name, item in ast.iter_fields(value)
+                    if not (name == "type_params" and not item)]]
+        if isinstance(value, list):
+            return [canonical(item) for item in value]
+        if isinstance(value, bytes):
+            return ["bytes", value.hex()]
+        if isinstance(value, complex):
+            return ["complex", value.real, value.imag]
+        if value is Ellipsis:
+            return ["ellipsis"]
+        return value
+    # ast.dump formatting and empty type_params differ between supported Python versions.
     tree = ast.Module(body=nodes, type_ignores=[])
-    return hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+    encoded = json.dumps(canonical(tree), ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def source_span(node):
