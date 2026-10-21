@@ -137,6 +137,10 @@ if [ "$AUTO_APPLY" = "1" ]; then
   fi
 else
   info "No service changes were applied."
-  echo "Run the selected role explicitly: marzban-stabilizer $MODE status"
-  [ "$MODE" != "both" ] || echo "Apply node and panel separately; each has independent settings and recovery."
+  if [ "$MODE" = "both" ]; then
+    echo "Inspect each role: marzban-stabilizer node status / marzban-stabilizer panel status"
+    echo "Apply node and panel separately; each has independent settings and recovery."
+  else
+    echo "Run the selected role explicitly: marzban-stabilizer $MODE status"
+  fi
 fi

@@ -273,6 +273,10 @@ class Panel:
         return transaction
 
     def publish(self, transaction, text, state):
+        if sha(self.compose) != transaction["before_sha256"]:
+            raise RuntimeError("Compose changed during staging; publication refused")
+        if self.inspect()["Id"] != transaction["container_before"]:
+            raise RuntimeError("Panel container changed during staging; publication refused")
         path = Path(transaction["directory"])
         atomic_write(path / "compose.after", text)
         transaction["after_sha256"] = hashlib.sha256(text.encode()).hexdigest()
@@ -295,6 +299,14 @@ class Panel:
         save_json(self.journal, transaction)
         emit("complete", action=transaction["action"], transaction=str(path), panel_ready=result["http_ready"],
              nodes=result["nodes"], users_count=result["users_count"])
+
+    def recover_after_failure(self, error):
+        emit("operation_failed", error_type=type(error).__name__, reason=str(error), journal=str(self.journal))
+        try:
+            self.recover()
+        except BaseException as recovery:
+            raise RuntimeError(f"Operation failed ({type(error).__name__}: {error}); "
+                               f"recovery failed ({type(recovery).__name__}: {recovery}); journal={self.journal}") from recovery
 
     def recover(self):
         transaction = json.loads(self.journal.read_text())
@@ -373,8 +385,8 @@ class Panel:
                 raise RuntimeError("Installation changed during staging; refusing publication")
             try:
                 self.publish(transaction, after, next_state)
-            except BaseException:
-                self.recover()
+            except BaseException as exc:
+                self.recover_after_failure(exc)
                 raise
 
     def restore(self):
@@ -409,8 +421,8 @@ class Panel:
         self.verify_model_delta(self.model(self.compose), self.model(staged))
         try:
             self.publish(transaction, after, None)
-        except BaseException:
-            self.recover()
+        except BaseException as exc:
+            self.recover_after_failure(exc)
             raise
 
     def status(self):

@@ -217,6 +217,21 @@ class TransactionTests(unittest.TestCase):
                 command()
         self.assertEqual(self.panel.count, 1)
 
+    def test_publication_rejects_external_compose_edit(self):
+        before = self.panel.compose.read_text()
+        transaction = self.panel.begin("apply", before, None, self.panel.inspect(), self.panel.probe(None))
+        modified = before + "# concurrent operator edit\n"
+        self.panel.compose.write_text(modified)
+        with self.assertRaisesRegex(RuntimeError, "changed during staging"):
+            self.panel.publish(transaction, before, None)
+        self.assertEqual(self.panel.compose.read_text(), modified)
+        self.assertEqual(self.panel.count, 0)
+
+    def test_recovery_failure_reports_both_causes(self):
+        with patch.object(self.panel, "recover", side_effect=RuntimeError("secondary recovery")):
+            with self.assertRaisesRegex(RuntimeError, "primary operation.*secondary recovery"):
+                self.panel.recover_after_failure(RuntimeError("primary operation"))
+
     def test_status_does_not_recreate(self):
         self.panel.status()
         self.assertEqual(self.panel.count, 0)
