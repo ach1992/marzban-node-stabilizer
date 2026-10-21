@@ -69,7 +69,7 @@ sudo marzban-stabilizer panel restore
 sudo marzban-stabilizer panel recover
 ```
 
-`restore` returns to the pre-installation topology, including the preceding manual bundle after explicit adoption. `recover` handles only an unfinished transaction and refuses unrelated Compose/state changes. These commands can recreate the service. Root-private backups, generated sources, and journals live under `PANEL_PATCH_DIR/transactions`; do not delete them while recovery may be needed. Failed Docker commands retain their full diagnostic output in a mode-0600 temporary file and print its path.
+`restore` returns to the pre-installation topology, including the preceding manual bundle after explicit adoption. `recover` handles only an unfinished transaction and refuses unrelated Compose/state changes, externally replaced containers, and edits to preceding override sources. A transaction label identifies replacements created by this tool even after an interrupted Docker command. These commands can recreate the service. Root-private backups, generated sources, and journals live under `PANEL_PATCH_DIR/transactions`; do not delete them while recovery may be needed. Failed Docker commands retain their full diagnostic output in a mode-0600 temporary file and print its path.
 
 Panel runtime payloads/fixtures derive from Marzban and retain its license at `lib/panel/LICENSE.Marzban`; the independent installer/control helpers retain this repository's MIT license.
 

@@ -22,27 +22,40 @@ import compose_mount
 from patch_panel import build_tree, load_spec
 
 ROLE = "marzban-panel-stabilizer"
+TRANSACTION_LABEL = "io.github.ach1992.marzban-stabilizer.transaction"
 FILES = tuple(load_spec()["files"])
 PROBE = r'''
-import http.client,json,os,socket,ssl,urllib.request
+import http.client,ipaddress,json,os,socket,ssl,urllib.request
 from pathlib import Path
 from sqlalchemy import create_engine,text
-from config import SQLALCHEMY_DATABASE_URL,UVICORN_HOST,UVICORN_PORT,UVICORN_UDS,UVICORN_SSL_CERTFILE,UVICORN_SSL_KEYFILE
+from config import DEBUG,SQLALCHEMY_DATABASE_URL,UVICORN_HOST,UVICORN_PORT,UVICORN_UDS,UVICORN_SSL_CERTFILE,UVICORN_SSL_KEYFILE
 tls=bool(UVICORN_SSL_CERTFILE and UVICORN_SSL_KEYFILE)
 ready=False
+host=UVICORN_HOST
+uds=UVICORN_UDS
+port=UVICORN_PORT
+if DEBUG:
+ if uds:port=8000
+ uds=None
+ host="127.0.0.1"
+elif not tls and not uds:
+ try:
+  address=ipaddress.ip_address(socket.gethostbyname(host))
+  if address==ipaddress.ip_address("0.0.0.0") or not address.is_private:host="localhost"
+ except ValueError:host="localhost"
 try:
- if UVICORN_UDS:
+ if uds:
   c=http.client.HTTPConnection("localhost",timeout=3)
-  sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.settimeout(3);sock.connect(UVICORN_UDS)
+  sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.settimeout(3);sock.connect(uds)
   c.sock=ssl._create_unverified_context().wrap_socket(sock,server_hostname="localhost") if tls else sock
   c.request("GET","/",headers={"Connection":"close"});r=c.getresponse();ready=200<=r.status<400;c.close()
  else:
-  host=UVICORN_HOST
   if host in ("0.0.0.0",""):host="127.0.0.1"
   if host=="::":host="[::1]"
   if ":" in host and not host.startswith("["):host="["+host+"]"
-  req=urllib.request.Request(("https" if tls else "http")+"://"+host+":"+str(UVICORN_PORT)+"/",headers={"Connection":"close"})
-  with urllib.request.urlopen(req,context=ssl._create_unverified_context(),timeout=3) as r:ready=200<=r.status<400
+  req=urllib.request.Request(("https" if tls else "http")+"://"+host+":"+str(port)+"/",headers={"Connection":"close"})
+  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+  with opener.open(req,timeout=3) as r:ready=200<=r.status<400
 except Exception:pass
 with create_engine(SQLALCHEMY_DATABASE_URL).connect() as c:
  nodes=[dict(r._mapping) for r in c.execute(text("SELECT id,name,status,xray_version FROM nodes ORDER BY id"))]
@@ -212,7 +225,8 @@ class Panel:
     def recreate(self, image, transaction_dir):
         # Pin this transaction to the exact already-installed image, even if its local tag moves.
         override = transaction_dir / "image-pin.json"
-        save_json(override, {"services": {self.service: {"image": image}}})
+        save_json(override, {"services": {self.service: {"image": image,
+                   "labels": {TRANSACTION_LABEL: transaction_dir.name}}}})
         emit("recreate_begin", service=self.service, image=image)
         self.compose_run(self.compose, "up", "-d", "--no-deps", "--force-recreate",
                          "--pull", "never", "--no-build", self.service, extra=override, timeout=120)
@@ -324,6 +338,22 @@ class Panel:
         if current_state not in (transaction["previous_state"], transaction.get("next_state")):
             raise RuntimeError("Panel state changed outside this transaction")
         self.model(before)
+        # A service name/Compose hash does not establish ownership of a newer container.
+        # The transaction label also covers a crash after Docker replaced the old ID.
+        current = self.inspect()
+        if current["Id"] != transaction["container_before"]:
+            labels = current["Config"].get("Labels") or {}
+            if current["Image"] != transaction["image"] or labels.get(TRANSACTION_LABEL) != path.name:
+                raise RuntimeError("Panel runtime changed outside this transaction; refusing recovery overwrite")
+        # Restoring an old bind mount is safe only while its source still matches the
+        # exact baseline. Never activate a subsequently edited operator-owned file.
+        for file, mount in self.mounts(before.read_text()).items():
+            if mount:
+                source = Path(mount.source)
+                if not source.is_absolute():
+                    source = self.compose.parent / source
+                if source.is_symlink() or not source.is_file() or sha(source) != transaction["baseline_runtime_hashes"][file]:
+                    raise RuntimeError("Original Panel source changed outside this transaction: " + file)
         atomic_write(self.compose, before.read_text(), stat.S_IMODE(self.compose.stat().st_mode))
         previous = transaction["previous_state"]
         if transaction["recreate_attempted"]:
