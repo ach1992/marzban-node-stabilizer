@@ -2,7 +2,7 @@
 
 A Debian/Ubuntu helper with independent Node and Panel stabilization roles. Existing Node commands remain supported.
 
-The tagged v0.2.1 release remains Node-only. The Panel commands below are part of the new development code; use the exact reviewed candidate commit when testing an unmerged PR. No production installation is implied by the development examples.
+Release v0.3.0 supports both Node and Panel roles. Choose the intended role explicitly before installation. Earlier v0.2.1 installations remain Node-only until the new role is installed.
 
 ## Choose a role
 
@@ -25,29 +25,29 @@ The installer is noninteractive: choose the role with `MODE` in the installation
 
 Omitting `MODE` selects `node` for compatibility with existing installations. `MODE=both AUTO_APPLY=1` is refused. An `apply` can recreate the selected Compose service; set `AUTO_APPLY=0` when you want to inspect before applying.
 
-Choose one of these commands for the integrated development code. Each example explicitly installs files only:
+Choose one of these commands for v0.3.0. Each example explicitly installs files only:
 
 Node host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=node AUTO_APPLY=0 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.3.0/install.sh | sudo env REF=v0.3.0 MODE=node AUTO_APPLY=0 bash
 ```
 
 Panel host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=panel AUTO_APPLY=0 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.3.0/install.sh | sudo env REF=v0.3.0 MODE=panel AUTO_APPLY=0 bash
 ```
 
 Host running both services:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=both AUTO_APPLY=0 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.3.0/install.sh | sudo env REF=v0.3.0 MODE=both AUTO_APPLY=0 bash
 ```
 
 After installation, invoke the selected role explicitly: `sudo marzban-stabilizer node apply` or `sudo marzban-stabilizer panel apply`. For `both`, configure each role's own Compose service and run those commands separately.
 
-For an unmerged candidate, replace `main` in both the URL and `REF` with its exact commit SHA. All selected components, including the Panel source rules and license, resolve to one immutable snapshot. Use `MODE=both` to install both command sets without changing services.
+For an unmerged candidate, replace the release tag in both the URL and `REF` with its exact commit SHA. All selected components, including the Panel source rules and license, resolve to one immutable snapshot. Use `MODE=both` to install both command sets without changing services.
 
 Then inspect and apply on the selected Panel host:
 
@@ -99,13 +99,13 @@ Panel runtime payloads/fixtures derive from Marzban and retain its license at `l
 
 ## Install the stable release
 
-The recommended production-facing install path is the latest tagged release. For `v0.2.1`:
+The recommended production-facing install path is the latest tagged release. For `v0.3.0`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env REF=v0.2.1 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.3.0/install.sh | sudo env REF=v0.3.0 MODE=node AUTO_APPLY=0 bash
 ```
 
-Both the installer URL and `REF` are pinned to the same release. The installer then resolves `REF` once to an immutable commit SHA and downloads the CLI and both Python helpers from that exact snapshot. It validates their syntax, installs them under `/usr/local/`, and runs `apply` unless `AUTO_APPLY=0` is set.
+Both the installer URL and `REF` are pinned to the same release. The installer resolves `REF` once to an immutable commit SHA, downloads only the selected role's components from that snapshot, validates them, and installs them under `/usr/local/`. The example above selects Node and installs only. Use the role-specific commands above for Panel or both; service activation follows the documented `AUTO_APPLY` settings.
 
 ### Install the latest development state
 
@@ -169,8 +169,8 @@ COMPOSE_FILE=/opt/marzban-node/docker-compose.yml
 If paths or service names differ:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env \
-  REF=v0.2.1 \
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.3.0/install.sh | sudo env \
+  REF=v0.3.0 \
   COMPOSE_FILE=/opt/marzban-node/docker-compose.yml \
   CONTAINER_NAME=marzban-node \
   SERVICE_NAME=marzban-node \
@@ -180,8 +180,8 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.
 Runtime tuning:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env \
-  REF=v0.2.1 \
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.3.0/install.sh | sudo env \
+  REF=v0.3.0 \
   TIMEOUT_SECONDS=7 \
   RESTART_GRACE_SECONDS=60 \
   bash
@@ -196,7 +196,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.
 ## Install only without applying
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.2.1/install.sh | sudo env REF=v0.2.1 AUTO_APPLY=0 bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/v0.3.0/install.sh | sudo env REF=v0.3.0 AUTO_APPLY=0 bash
 ```
 
 Then apply manually:
