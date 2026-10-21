@@ -5,7 +5,18 @@ REPO="${REPO:-ach1992/marzban-node-stabilizer}"
 REF="${REF:-${BRANCH:-main}}"
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/sbin/marzban-node-stabilizer}"
 LIB_DIR="${LIB_DIR:-/usr/local/lib/marzban-node-stabilizer}"
-AUTO_APPLY="${AUTO_APPLY:-1}"
+MODE="${MODE:-node}"
+case "$MODE" in
+  node) AUTO_APPLY="${AUTO_APPLY:-1}" ;;
+  panel|both) AUTO_APPLY="${AUTO_APPLY:-0}" ;;
+  *) echo "[ERROR] MODE must be node, panel or both." >&2; exit 2 ;;
+esac
+if [ "$MODE" = "both" ] && [ "$AUTO_APPLY" != "0" ]; then
+  echo "[ERROR] Install both with AUTO_APPLY=0, then apply each role explicitly." >&2
+  exit 2
+fi
+PANEL_INSTALL_PATH="${PANEL_INSTALL_PATH:-$(dirname -- "$INSTALL_PATH")/marzban-panel-stabilizer}"
+STABILIZER_INSTALL_PATH="${STABILIZER_INSTALL_PATH:-$(dirname -- "$INSTALL_PATH")/marzban-stabilizer}"
 
 TMP_DIR=""
 RESOLVED_REF=""
@@ -81,34 +92,51 @@ TMP_DIR="$(mktemp -d)"
 
 info "Resolved ${REPO}@${REF} -> ${RESOLVED_REF}"
 info "Downloading stabilizer components from immutable commit ${RESOLVED_REF}"
-curl -fsSL "${RAW_BASE}/bin/marzban-node-stabilizer" -o "$TMP_DIR/marzban-node-stabilizer"
-curl -fsSL "${RAW_BASE}/lib/patch_rest_service.py" -o "$TMP_DIR/patch_rest_service.py"
-curl -fsSL "${RAW_BASE}/lib/compose_mount.py" -o "$TMP_DIR/compose_mount.py"
+components=(bin/marzban-stabilizer lib/compose_mount.py)
+if [ "$MODE" = "node" ] || [ "$MODE" = "both" ]; then
+  components+=(bin/marzban-node-stabilizer lib/patch_rest_service.py)
+fi
+if [ "$MODE" = "panel" ] || [ "$MODE" = "both" ]; then
+  components+=(bin/marzban-panel-stabilizer lib/panel_stabilizer.py lib/patch_panel.py lib/panel/patch-spec.json lib/panel/LICENSE.Marzban)
+fi
+for component in "${components[@]}"; do
+  mkdir -p -- "$TMP_DIR/$(dirname -- "$component")"
+  curl -fsSL "${RAW_BASE}/${component}" -o "$TMP_DIR/$component"
+done
 
 info "Validating downloaded components..."
-bash -n "$TMP_DIR/marzban-node-stabilizer"
-python3 -m py_compile "$TMP_DIR/patch_rest_service.py" "$TMP_DIR/compose_mount.py"
+for component in "${components[@]}"; do
+  case "$component" in
+    bin/*) bash -n "$TMP_DIR/$component" ;;
+    *.py) python3 -m py_compile "$TMP_DIR/$component" ;;
+    *.json) python3 -m json.tool "$TMP_DIR/$component" >/dev/null ;;
+  esac
+done
 
-install -d -m 0755 -- "$(dirname -- "$INSTALL_PATH")" "$LIB_DIR"
-install -m 0755 -- "$TMP_DIR/marzban-node-stabilizer" "$INSTALL_PATH.tmp.$$"
-mv -f -- "$INSTALL_PATH.tmp.$$" "$INSTALL_PATH"
-install -m 0644 -- "$TMP_DIR/patch_rest_service.py" "$LIB_DIR/patch_rest_service.py.tmp.$$"
-mv -f -- "$LIB_DIR/patch_rest_service.py.tmp.$$" "$LIB_DIR/patch_rest_service.py"
-install -m 0644 -- "$TMP_DIR/compose_mount.py" "$LIB_DIR/compose_mount.py.tmp.$$"
-mv -f -- "$LIB_DIR/compose_mount.py.tmp.$$" "$LIB_DIR/compose_mount.py"
+install -d -m 0755 -- "$LIB_DIR"
+for component in "${components[@]}"; do
+  mode=0644
+  case "$component" in
+    bin/marzban-node-stabilizer) destination="$INSTALL_PATH"; mode=0755 ;;
+    bin/marzban-panel-stabilizer) destination="$PANEL_INSTALL_PATH"; mode=0755 ;;
+    bin/marzban-stabilizer) destination="$STABILIZER_INSTALL_PATH"; mode=0755 ;;
+    lib/*) destination="$LIB_DIR/${component#lib/}" ;;
+  esac
+  install -d -m 0755 -- "$(dirname -- "$destination")"
+  install -m "$mode" -- "$TMP_DIR/$component" "$destination.tmp.$$"
+  mv -f -- "$destination.tmp.$$" "$destination"
+done
 
-info "Installed successfully."
-
+info "Installed $MODE role(s) from $RESOLVED_REF."
 if [ "$AUTO_APPLY" = "1" ]; then
-  echo
-  info "Running patch automatically..."
-  echo
-  "$INSTALL_PATH" apply
-  echo
-  info "All done."
+  info "Applying the selected role; its Compose service will be recreated."
+  if [ "$MODE" = "node" ]; then
+    "$INSTALL_PATH" apply
+  else
+    "$PANEL_INSTALL_PATH" apply
+  fi
 else
-  echo
-  info "Auto apply disabled."
-  echo "Run manually with:"
-  echo "  sudo marzban-node-stabilizer apply"
+  info "No service changes were applied."
+  echo "Run the selected role explicitly: marzban-stabilizer $MODE status"
+  [ "$MODE" != "both" ] || echo "Apply node and panel separately; each has independent settings and recovery."
 fi

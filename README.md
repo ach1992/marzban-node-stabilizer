@@ -1,8 +1,76 @@
-# Marzban Node Stabilizer
+# Marzban Stabilizer — Node and Panel
 
-A small Debian/Ubuntu helper that applies a conservative, recoverable node-side patch for Marzban Node startup/restart instability.
+A Debian/Ubuntu helper with independent Node and Panel stabilization roles. Existing Node commands remain supported.
 
-The project is intentionally limited to the Marzban Node host. It does **not** modify the Marzban Panel.
+The tagged v0.2.1 release remains Node-only. The Panel commands below are part of the new development code; use the exact reviewed candidate commit when testing an unmerged PR. No production installation is implied by the development examples.
+
+## Choose a role
+
+The repository name stays `marzban-node-stabilizer`. Commands are explicit:
+
+```bash
+sudo marzban-stabilizer node status
+sudo marzban-stabilizer panel status
+```
+
+`marzban-node-stabilizer` remains the existing Node entry point. `marzban-panel-stabilizer` is the direct Panel entry point. Neither role invokes the other.
+
+The development installer accepts `MODE=node`, `MODE=panel`, or `MODE=both`. Node remains the default and retains its existing automatic apply behavior. Panel and both default to install-only (`AUTO_APPLY=0`). `MODE=both AUTO_APPLY=1` is refused; apply each role explicitly with its own target settings.
+
+Install the Panel role from a reviewed integrated development state:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/marzban-node-stabilizer/main/install.sh | sudo env REF=main MODE=panel bash
+```
+
+For an unmerged candidate, replace `main` in both the URL and `REF` with its exact commit SHA. All selected components, including the Panel source rules and license, resolve to one immutable snapshot. Use `MODE=both` to install both command sets without changing services.
+
+Then inspect and apply on the selected Panel host:
+
+```bash
+sudo marzban-stabilizer panel check
+sudo marzban-stabilizer panel apply
+sudo marzban-stabilizer panel status
+sudo marzban-stabilizer panel diagnose
+```
+
+`check` extracts/validates image sources using a temporary stopped container; it does not replace Compose or recreate the service. `apply` stages all five overrides, validates the effective Compose delta, backs up the preceding configuration, and recreates only the selected service once. An identical healthy reapply does not recreate. Activation failure attempts verified recovery; that recovery can require a second interruption.
+
+The Panel role requires Docker Compose v2, Python 3.10+, and an existing running Panel service. Defaults:
+
+```text
+PANEL_COMPOSE_FILE=/opt/marzban/docker-compose.yml
+PANEL_SERVICE_NAME=marzban
+PANEL_PATCH_DIR=/opt/marzban-panel-patches
+PANEL_WAIT_SECONDS=180
+PANEL_STABLE_SECONDS=30
+```
+
+The container is found from the selected Compose project/service. Set `PANEL_CONTAINER_NAME` only to select that same project's container explicitly. Equivalent CLI flags are listed by `marzban-stabilizer panel --help`. Existing generic `COMPOSE_FILE`, `SERVICE_NAME`, and `CONTAINER_NAME` overrides are also accepted for direct Panel invocation. Keep role settings separate when both commands are installed.
+
+Panel behavior retains a 150-second observation cache, updates it immediately on lifecycle transitions, prevents overlapping lifecycle workers per node, preserves the newest pending explicit Core config, and reaches connecting nodes during Core changes. It reserves the Panel TCP listener before lifespan starts local Xray, while preserving failed-startup reporting. An existing local Core inbound conflicting with the Panel port is still a configuration problem; the Panel listener takes precedence.
+
+The source transformer currently recognizes the reviewed image/source shapes recorded in `lib/panel/patch-spec.json`, including the original image and the earlier cached-node variant. Changed affected structures fail before publication. `status` reports image/source ownership/runtime drift. After an upstream image upgrade, re-run `check` and `apply` only when compatibility passes; an old bind mount must not be treated as proof of compatibility.
+
+Foreign overrides are refused by default. The exact five-file manual recovery patch can be adopted explicitly:
+
+```bash
+sudo marzban-stabilizer panel check --adopt-reviewed-patch
+sudo marzban-stabilizer panel apply --adopt-reviewed-patch
+```
+
+Adoption verifies all five running and host source hashes. It preserves the old files and remembers their preceding mount topology; it does not adopt arbitrary custom code.
+
+Restore or recover a partial operation:
+
+```bash
+sudo marzban-stabilizer panel restore
+sudo marzban-stabilizer panel recover
+```
+
+`restore` returns to the pre-installation topology, including the preceding manual bundle after explicit adoption. `recover` handles only an unfinished transaction and refuses unrelated Compose/state changes. These commands can recreate the service. Root-private backups, generated sources, and journals live under `PANEL_PATCH_DIR/transactions`; do not delete them while recovery may be needed. Failed Docker commands retain their full diagnostic output in a mode-0600 temporary file and print its path.
+
+Panel runtime payloads/fixtures derive from Marzban and retain its license at `lib/panel/LICENSE.Marzban`; the independent installer/control helpers retain this repository's MIT license.
 
 ## Install the stable release
 

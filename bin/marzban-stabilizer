@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+case "${1:-help}" in
+  node) command_path="${NODE_STABILIZER_PATH:-$SCRIPT_DIR/marzban-node-stabilizer}" ;;
+  panel) command_path="${PANEL_STABILIZER_PATH:-$SCRIPT_DIR/marzban-panel-stabilizer}" ;;
+  help|-h|--help)
+    echo "Usage: marzban-stabilizer {node|panel} {check|apply|status|diagnose|restore|recover}"
+    echo "Node keeps its existing commands. Panel adds check/recover and explicit adoption."
+    exit 0
+    ;;
+  *) echo "[ERROR] Select node or panel explicitly." >&2; exit 2 ;;
+esac
+shift
+[ -x "$command_path" ] || { echo "[ERROR] Selected role is not installed: $command_path" >&2; exit 1; }
+exec "$command_path" "$@"

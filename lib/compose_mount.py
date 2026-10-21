@@ -390,36 +390,39 @@ def _short_volume_items(lines: list[str], service_name: str) -> list[VolumeMount
     return mounts
 
 
-def _target_mounts(lines: list[str], service_name: str) -> list[VolumeMount]:
+def _target_mounts(lines: list[str], service_name: str, target: str = TARGET) -> list[VolumeMount]:
+    _validate_canonical_container_target(target)
+    if target == "/":
+        raise ValueError("managed target must be a file path")
     exact: list[VolumeMount] = []
 
     for mount in _short_volume_items(lines, service_name):
-        if mount.target == TARGET:
+        if mount.target == target:
             exact.append(mount)
             continue
 
-        if mount.target == "/" or TARGET.startswith(mount.target + "/"):
+        if mount.target == "/" or target.startswith(mount.target + "/"):
             raise ValueError(
-                f"Compose volume target {mount.target!r} is an ancestor of {TARGET!r}; "
+                f"Compose volume target {mount.target!r} is an ancestor of {target!r}; "
                 "effective file ownership is ambiguous and cannot be rewritten safely"
             )
 
     if len(exact) > 1:
-        raise ValueError("multiple exact rest_service.py mounts found for selected service")
+        raise ValueError(f"multiple exact {Path(target).name} mounts found for selected service")
     return exact
 
 
-def service_has_mount(text: str, service_name: str) -> bool:
-    return bool(_target_mounts(text.splitlines(), service_name))
+def service_has_mount(text: str, service_name: str, target: str = TARGET) -> bool:
+    return bool(_target_mounts(text.splitlines(), service_name, target))
 
 
-def mount_source(text: str, service_name: str) -> str | None:
-    mounts = _target_mounts(text.splitlines(), service_name)
+def mount_source(text: str, service_name: str, target: str = TARGET) -> str | None:
+    mounts = _target_mounts(text.splitlines(), service_name, target)
     return mounts[0].source if mounts else None
 
 
-def _remove_target_mount(lines: list[str], service_name: str) -> list[str]:
-    mounts = _target_mounts(lines, service_name)
+def _remove_target_mount(lines: list[str], service_name: str, target: str = TARGET) -> list[str]:
+    mounts = _target_mounts(lines, service_name, target)
     if not mounts:
         return lines
     idx = mounts[0].index
@@ -446,16 +449,16 @@ def _remove_empty_service_volumes(lines: list[str], service_name: str) -> list[s
     return lines[:volumes_idx] + lines[volumes_end:]
 
 
-def remove_mount(text: str, service_name: str) -> str:
+def remove_mount(text: str, service_name: str, target: str = TARGET) -> str:
     lines = text.splitlines()
     _service_bounds(lines, service_name)
     _short_volume_items(lines, service_name)
-    lines = _remove_target_mount(lines, service_name)
+    lines = _remove_target_mount(lines, service_name, target)
     lines = _remove_empty_service_volumes(lines, service_name)
     return "\n".join(lines) + "\n"
 
 
-def add_mount(text: str, service_name: str, patch_file: str) -> str:
+def add_mount(text: str, service_name: str, patch_file: str, target: str = TARGET, options: str | None = "ro") -> str:
     if not patch_file.startswith("/"):
         raise ValueError("patch file path must be absolute")
     if any(ch in patch_file for ch in ("\n", "\r", '"', "'", ":", "$", "#")):
@@ -464,15 +467,18 @@ def add_mount(text: str, service_name: str, patch_file: str) -> str:
     lines = text.splitlines()
     _service_bounds(lines, service_name)
     _short_volume_items(lines, service_name)
-    mounts = _target_mounts(lines, service_name)
-    if mounts and mounts[0].source == patch_file and mounts[0].options == "ro":
+    mounts = _target_mounts(lines, service_name, target)
+    if mounts and mounts[0].source == patch_file and mounts[0].options == options:
         return "\n".join(lines) + "\n"
     if mounts:
-        lines = _remove_target_mount(lines, service_name)
+        lines = _remove_target_mount(lines, service_name, target)
 
     _, service_end, service_indent = _service_bounds(lines, service_name)
     bounds = _volumes_bounds(lines, service_name)
-    mount_line = f'- "{patch_file}:{TARGET}:ro"'
+    if options is not None and not re.fullmatch(r"[A-Za-z0-9_,=-]+", options):
+        raise ValueError("unsupported mount options")
+    suffix = ":" + options if options is not None else ""
+    mount_line = f'- "{patch_file}:{target}{suffix}"'
 
     if bounds is None:
         key_indent = " " * (service_indent + 2)
@@ -512,23 +518,24 @@ def main() -> int:
     parser.add_argument("--file", required=True, type=Path)
     parser.add_argument("--service", required=True)
     parser.add_argument("--patch-file")
+    parser.add_argument("--target", default=TARGET)
     args = parser.parse_args()
 
     original = args.file.read_text()
     try:
         if args.action == "has":
-            return 0 if service_has_mount(original, args.service) else 1
+            return 0 if service_has_mount(original, args.service, args.target) else 1
         if args.action == "source":
-            source = mount_source(original, args.service)
+            source = mount_source(original, args.service, args.target)
             if source:
                 print(source)
             return 0
         if args.action == "add":
             if not args.patch_file:
                 raise ValueError("--patch-file is required for add")
-            updated = add_mount(original, args.service, args.patch_file)
+            updated = add_mount(original, args.service, args.patch_file, args.target)
         else:
-            updated = remove_mount(original, args.service)
+            updated = remove_mount(original, args.service, args.target)
     except Exception as exc:
         print(f"[ERROR] Could not safely inspect/edit {args.file}: {exc}", file=sys.stderr)
         return 2

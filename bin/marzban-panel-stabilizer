@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/../lib/panel_stabilizer.py" ]; then
+  LIBRARY="$SCRIPT_DIR/../lib"
+else
+  LIBRARY="${INSTALLED_LIB_DIR:-/usr/local/lib/marzban-node-stabilizer}"
+fi
+exec python3 "$LIBRARY/panel_stabilizer.py" "$@"
